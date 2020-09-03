@@ -1,14 +1,19 @@
 # Negation Detection with deep learning methods.
 
-===
+------
 
 Code for my master project at Nanyang Technological University Singapore.
 
 Requirements:
+
 python: 3.x
+
 pytorch: 1.5+
+
 gensim: 3.x
+
 keras (only for the padding of input sequence, can be removed)
+
 
 Performance(for now):
 
@@ -17,7 +22,9 @@ Performance(for now):
 |ScopeTokenF1|      0.90        |        0.99        |         0.90         |     0.96    |
 
 The transformer part (transformer.py) was adapted based on Aditya and Suraj's Transformers-For-Negation-and-Speculation: 
+
 https://github.com/adityak6798/Transformers-For-Negation-and-Speculation
+
 
 The data pre-processing part (data.py) was modified from the same repo, but added my personal label augmentation options and changed the dataloader structure.
 
