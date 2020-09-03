@@ -1,0 +1,216 @@
+Starsem (Sherlock)
+Learn with raw embedding:
+    LSTM 3labels (0:pad, 1:scope, 2:nonscope)
+    Evaluating
+    rouge-1 f1: {'f': 0.711746215147529, 'p': 0.8288137794755766, 'r': 0.7066146215860032}
+    Precision: 1
+    Recall: 0.24369747899159663
+    F1 Score: 0.3918918918918919
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     21000
+            1       0.65      0.82      0.73       849
+            2       0.91      0.81      0.86      1951
+
+        accuracy                           0.98     23800
+    macro avg       0.85      0.88      0.86     23800
+    weighted avg       0.98      0.98      0.98     23800
+
+    GRU 3labels (0:pad, 1:scope, 2:nonscope)
+    Evaluating
+    rouge-1 f1: {'f': 0.7632539543722355, 'p': 0.8256742062619211, 'r': 0.7755525375117174}
+    Precision: 1
+    Recall: 0.3865546218487395
+    F1 Score: 0.5575757575757576
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     21000
+            1       0.78      0.82      0.80       849
+            2       0.92      0.90      0.91      1951
+
+        accuracy                           0.99     23800
+    macro avg       0.90      0.91      0.90     23800
+    weighted avg       0.99      0.99      0.99     23800
+
+With FastText:
+    LSTM 3labels (0:pad, 1:scope, 2:nonscope)
+    Cue considered nonscope
+
+    Evaluating
+    rouge-1 f1: {'f': 0.7535246359795622, 'p': 0.8215046595561302, 'r': 0.768544721561963}
+    Precision: 1
+    Recall: 0.3793103448275862
+    F1 Score: 0.5499999999999999
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     12637
+            1       0.80      0.79      0.80       738
+            2       0.90      0.90      0.90      1473
+
+        accuracy                           0.98     14848
+    macro avg       0.90      0.90      0.90     14848
+    weighted avg       0.98      0.98      0.98     14848
+
+
+    LSTM 3labels (0:pad, 1:scope, 2:nonscope)
+    Enhanced vocab (using FastText vocab instead of vocab built from training set)
+    Evaluating
+    rouge-1 f1: {'f': 0.7694421391204674, 'p': 0.827375728142716, 'r': 0.7825421704732051}
+    Precision: 1
+    Recall: 0.3879310344827586
+    F1 Score: 0.5590062111801242
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     12637
+            1       0.82      0.80      0.81       738
+            2       0.90      0.91      0.91      1473
+
+        accuracy                           0.98     14848
+    macro avg       0.91      0.90      0.91     14848
+    weighted avg       0.98      0.98      0.98     14848
+
+
+
+    LSTM 4labels (0:pad, 1:scope, 2:nonscope, 3:cue)
+
+    Evaluating
+    rouge-1 f1: {'f': 0.8048510974186427, 'p': 0.8479871977526645, 'r': 0.8227838851761267}
+    Precision: 1
+    Recall: 0.4827586206896552
+    F1 Score: 0.6511627906976745
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     12637
+            1       0.81      0.80      0.80       738
+            2       0.90      0.90      0.90      1372
+            3       0.86      1.00      0.93       101
+
+        accuracy                           0.98     14848
+    macro avg       0.89      0.92      0.91     14848
+    weighted avg       0.98      0.98      0.98     14848
+
+
+    GRU 3labels (0:pad, 1:scope, 2:nonscope)
+
+    Evaluating
+    rouge-1 f1: {'f': 0.7932355429938777, 'p': 0.8202934102465038, 'r': 0.8284548066875653}
+    Precision: 1
+    Recall: 0.4827586206896552
+    F1 Score: 0.6511627906976745
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     12637
+            1       0.88      0.81      0.84       738
+            2       0.91      0.94      0.93      1473
+
+        accuracy                           0.98     14848
+    macro avg       0.93      0.92      0.92     14848
+    weighted avg       0.98      0.98      0.98     14848
+
+
+    GRU 4labels (0:pad, 1:scope, 2:nonscope, 3:cue)
+
+    Evaluating
+    rouge-1 f1: {'f': 0.8217749264626356, 'p': 0.8278497948693182, 'r': 0.874457164004578}
+    Precision: 1
+    Recall: 0.5517241379310345
+    F1 Score: 0.7111111111111111
+                precision    recall  f1-score   support
+            0       1.00      1.00      1.00     12637
+            1       0.91      0.79      0.85       738
+            2       0.90      0.95      0.93      1372
+            3       0.86      1.00      0.92       101
+
+        accuracy                           0.99     14848
+    macro avg       0.92      0.94      0.92     14848
+    weighted avg       0.99      0.99      0.99     14848
+
+Raw embedding with multihead attention:
+    LSTM 3labels (0:pad, 1:scope, 2:nonscope)
+
+    Evaluating
+    rouge-1 f1: {'f': 0.792360995207793, 'p': 0.7985380755172882, 'r': 0.8180279571035872}
+    Precision: 1
+    Recall: 0.4117647058823529
+    F1 Score: 0.5833333333333334
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     21000
+            1       0.87      0.84      0.85       849
+            2       0.93      0.94      0.94      1951
+
+        accuracy                           0.99     23800
+    macro avg       0.93      0.93      0.93     23800
+    weighted avg       0.99      0.99      0.99     23800
+
+    GRU 3labels (0:pad, 1:scope, 2:nonscope)
+
+    Evaluating
+    rouge-1 f1: {'f': 0.8437028472901361, 'p': 0.866340268164682, 'r': 0.8407506704284546}
+    Precision: 1
+    Recall: 0.5042016806722689
+    F1 Score: 0.6703910614525139
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     21000
+            1       0.87      0.91      0.89       849
+            2       0.96      0.94      0.95      1951
+
+        accuracy                           0.99     23800
+    macro avg       0.94      0.95      0.95     23800
+    weighted avg       0.99      0.99      0.99     23800
+
+    GRU 4labels(0:pad, 1:scope, 2:nonscope, 3:cue)
+    Evaluating
+    rouge-1 f1: {'f': 0.871937068683627, 'p': 0.8723427575354554, 'r': 0.8835358402278267}
+    Precision: 1
+    Recall: 0.6293103448275862
+    F1 Score: 0.7724867724867724
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     20989
+            1       0.91      0.88      0.89       727
+            2       0.94      0.95      0.94      1372
+            3       0.93      1.00      0.97       112
+
+        accuracy                           0.99     23200
+    macro avg       0.94      0.96      0.95     23200
+    weighted avg       0.99      0.99      0.99     23200
+
+FastText with multihead attention
+
+    GRU 3labels (0:pad, 1:scope, 2:nonscope)
+    Evaluating
+    rouge-1 f1: {'f': 0.8449185785826397, 'p': 0.8658241258788908, 'r': 0.8443384086117649}
+    Precision: 1
+    Recall: 0.4957983193277311
+    F1 Score: 0.6629213483146068
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     21000
+            1       0.87      0.91      0.89       849
+            2       0.96      0.94      0.95      1951
+
+        accuracy                           0.99     23800
+    macro avg       0.95      0.95      0.95     23800
+    weighted avg       0.99      0.99      0.99     23800
+
+
+Bioscope_abstract
+
+LSTM 3labels (0:pad, 1:scope, 2:nonscope)
+
+    Evaluating
+    rouge-1 f1: {'f': 0.8843475042400323, 'p': 0.9113403115352497, 'r': 0.9007952300917058}
+    Precision: 1
+    Recall: 0.6511627906976745
+    F1 Score: 0.7887323943661972
+                precision    recall  f1-score   support
+
+            0       1.00      1.00      1.00     44362
+            1       0.90      0.89      0.89      1987
+            2       0.96      0.96      0.96      5251
+
+        accuracy                           0.99     51600
+    macro avg       0.95      0.95      0.95     51600
+    weighted avg       0.99      0.99      0.99     51600
