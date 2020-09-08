@@ -33,6 +33,8 @@ class Neg(nn.Module):
         self.linear = nn.Linear(self.hidden_dim*2, self.label_dim)
         self.init_linear(self.linear)
         self.label_emb = nn.Embedding(self.label_dim, self.hidden_dim*2)
+        self.init_embedding(self.label_emb)
+        self.cel = nn.CrossEntropyLoss(ignore_index=0)
 
         if param.encoder_attention is None:
             pass
@@ -77,12 +79,17 @@ class Neg(nn.Module):
                 self.init_linear(self.fc[3])
                 self.init_linear(self.fc[6])
             elif param.decoder_attention == 'multihead':
-                self.attn = multihead_attention(self.hidden_dim*2, num_heads=param.num_attention_head, dropout_rate=param.dropout)
-                self.init_linear(self.attn.K_proj[0])
+                self.attn = MultiHeadAttention(self.hidden_dim*2, num_heads=param.num_attention_head, dropout_rate=param.dropout)
+                self.init_linear(self.attn.linear_q)
+                self.init_linear(self.attn.linear_k)
+                self.init_linear(self.attn.linear_v)
+                """
                 self.init_linear(self.attn.Q_proj[0])
-                self.init_linear(self.attn.V_proj[0])
+                self.init_linear(self.attn.K_proj[0])
+                self.init_linear(self.attn.V_proj[0]) """
                 self.fc = nn.Linear(self.hidden_dim*4, self.hidden_dim*2, bias=False)
                 self.init_linear(self.fc)
+                self.ff = FeedForward(self.hidden_dim*2, 1024)
 
     
     def load_pretrained_word_embedding(self, pre_word_embeddings):
@@ -99,7 +106,10 @@ class Neg(nn.Module):
         batch_size = len(input_[0])
         word_emb = self.word_emb(input_[0])
         cue_emb = self.cue_emb(input_[1])
-        label_emb = self.label_emb(input_[2])
+        input_label_seq_tensor = torch.zeros(batch_size, param.label_dim).long().to(device)
+        for i in range(batch_size):
+            input_label_seq_tensor[i, :param.label_dim] = torch.LongTensor([i for i in range(param.label_dim)])
+        label_emb = self.label_emb(input_label_seq_tensor)
         if param.encoder_attention is None:
             embeds = torch.cat((word_emb, cue_emb), 2)
         else:
@@ -133,10 +143,17 @@ class Neg(nn.Module):
                 fc_output = self.dropout(fc_output)
             elif param.decoder_attention == 'multihead':
                 #unpad_outputs = self.dropout(unpad_outputs.transpose(1, 0))
+                #attn_mask = self.attention_padding_mask(input_[0], input_[2], 0)
+                attn_out, _ = self.attn(label_emb, unpad_outputs, unpad_outputs, None)
+                #fc_output = torch.cat([unpad_outputs, attn_out], -1)
+                fc_output = self.ff(attn_out)
+                fc_output = self.dropout(fc_output)
+                """
+                #unpad_outputs = self.dropout(unpad_outputs.transpose(1, 0))
                 attn_out = self.attn(unpad_outputs, label_emb, label_emb, False)
                 fc_output = torch.cat([unpad_outputs, attn_out], -1)
                 fc_output = self.fc(fc_output)
-                fc_output = self.dropout(fc_output)
+                fc_output = self.dropout(fc_output)"""
 
         lin_out = self.linear(fc_output)
         out = F.log_softmax(lin_out, dim=1)
@@ -178,7 +195,63 @@ class Neg(nn.Module):
         if input_.bias is not None:
             input_.bias.data.zero_()
 
-class multihead_attention(nn.Module):
+    def attention_padding_mask(self, q, k, padding_index=0):
+        """Generate mask tensor for padding value
+        Args:
+            q (Tensor): (B, T_q)
+            k (Tensor): (B, T_k)
+            padding_index (int): padding index. Default: 0
+        Returns:
+            (torch.BoolTensor): Mask with shape (B, T_q, T_k). True element stands for requiring making.
+        Notes:
+            Assume padding_index is 0:
+            k.eq(0) -> BoolTensor (B, T_k)
+            k.eq(0).unsqueeze(1)  -> (B, 1, T_k)
+            k.eq(0).unsqueeze(1).expand(-1, q.size(-1), -1) -> (B, T_q, T_k)
+        """
+
+        mask = k.eq(padding_index).unsqueeze(1).expand(-1, q.size(-1), -1)
+        return mask
+
+class ScaledDotProductAttention(nn.Module):
+    """Scaled dot-product attention calculation"""
+
+    def __init__(self, dropout_rate=0.0, **kwargs):
+        """Initialize ScaledDotProductAttention
+        Args:
+            dropout_rate (float): attention dropout_rate rate
+        """
+        super().__init__()
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, q, k, v, attn_mask=None):
+        """Forward
+        Args:
+            q (torch.Tensor): Query matrix, (B, T_q, D_q)
+            k (torch.Tensor): Key matrix, (B, T_k, D_k)
+            v (torch.Tensor): Value matrix, (B, T_v, D_v) T_v = T_k, D_v = D_k
+            attn_mask (torch.BoolTensor | None): Mask tensor. True element will be masked.
+        Returns:
+            output (B, T_q, D_v); attention (B, T_q, T_k)
+        """
+        attention = torch.bmm(q, k.permute(0, 2, 1))  # (B, T_q, T_k)
+
+        # Scale
+        attention *= k.size(-1) ** -0.5
+
+        if attn_mask is not None:
+            attention.masked_fill_(attn_mask, -np.inf)  # positions that require masking are now -np.inf
+
+        attention = F.softmax(attention, dim=-1)
+
+        attention = self.dropout(attention)
+
+        output = attention.bmm(v)  # (B, T_q, D_v)
+
+        return output, attention
+
+"""
+class MultiHeadAttention(nn.Module):
 
     def __init__(self, num_units, num_heads=1, dropout_rate=0, gpu=True, causality=False):
         '''Applies multihead attention.
@@ -188,7 +261,7 @@ class multihead_attention(nn.Module):
             causality: Boolean. If true, units that reference the future are masked.
             num_heads: An int. Number of heads.
         '''
-        super(multihead_attention, self).__init__()
+        super(MultiHeadAttention, self).__init__()
         self.gpu = gpu
         self.num_units = num_units
         self.num_heads = num_heads
@@ -241,3 +314,79 @@ class multihead_attention(nn.Module):
         outputs += queries
 
         return outputs
+"""
+
+class MultiHeadAttention(nn.Module):
+
+    def __init__(self, model_dim=512, num_heads=8, dropout_rate=0.0, attention_type='scaled_dot'):
+        super().__init__()
+
+        assert model_dim % num_heads == 0, 'model_dim should be devided by num_heads'
+
+        self.h_size = model_dim
+        self.num_heads = num_heads
+        self.head_h_size = model_dim // num_heads
+
+        self.linear_q = nn.Linear(self.h_size, self.h_size)
+        self.linear_k = nn.Linear(self.h_size, self.h_size)
+        self.linear_v = nn.Linear(self.h_size, self.h_size)
+
+        self.attention = ScaledDotProductAttention(q_dim=self.head_h_size, k_dim=self.head_h_size)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.lnorm = nn.LayerNorm(model_dim)
+
+    def forward(self, q, k, v, attn_mask=None):
+        batch_size = q.size(0)
+
+        # Residual
+        residual = q
+
+        # Linear projection
+        q = self.linear_q(q)
+        k = self.linear_k(k)
+        v = self.linear_v(v)
+
+        # Form multi heads
+        q = q.view(self.num_heads * batch_size, -1, self.head_h_size)  # (h * B, T_q, D / h)
+        k = k.view(self.num_heads * batch_size, -1, self.head_h_size)  # (h * B, T_k, D / h)
+        v = v.view(self.num_heads * batch_size, -1, self.head_h_size)  # (h * B, T_v, D / h)
+
+        if attn_mask is not None:
+            attn_mask = attn_mask.repeat(self.num_heads, 1, 1)  # (h * B, T_q, T_k)
+
+        context, attention = self.attention(q, k, v, attn_mask=attn_mask)
+        # context: (h * B, T_q, D_v) attention: (h * B, T_q, T_k)
+
+        # Concatenate heads
+        context = context.view(batch_size, -1, self.h_size)  # (B, T_q, D)
+
+        # Dropout
+        output = self.dropout(context)  # (B, T_q, D)
+
+        # Residual connection and Layer Normalization
+        output = self.lnorm(residual + output)  # (B, T_q, D)
+
+        return output, attention
+
+
+class FeedForward(nn.Module):
+
+    def __init__(self, model_dim=512, hidden_dim=2048, dropout_rate=0.0):
+        super().__init__()
+
+        self.model_dim = model_dim
+        self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout_rate
+
+        self.linear1 = nn.Linear(self.model_dim, self.hidden_dim)
+        self.linear2 = nn.Linear(self.hidden_dim, self.model_dim)
+        self.norm = nn.LayerNorm(model_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, x):
+        output = self.linear2(F.relu(self.linear1(x)))
+
+        output = self.dropout(output)
+
+        output = self.norm(output + x)
+        return output

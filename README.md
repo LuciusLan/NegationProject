@@ -17,9 +17,7 @@ keras (only for the padding of input sequence, can be removed)
 
 Performance(for now):
 
-|Dataset Name| *SEM 2012 CD-SCO | BioScope Abstracts | BioScope Full Papers | SFU Review  |
-|------------|------------------|--------------------|----------------------|-------------|
-|ScopeTokenF1|      0.90        |        0.99        |         0.90         |     0.96    |
+Previous performance was tested under wrong setting. Pending new round of training.
 
 The transformer part (transformer.py) was adapted based on Aditya and Suraj's Transformers-For-Negation-and-Speculation: 
 
