@@ -12,7 +12,7 @@ import torch
 import re
 import os
 from scipy import stats
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -881,7 +881,7 @@ class Data:
         Returns: train_dataloader, list of validation dataloaders, list of test dataloaders
         '''
         method = SCOPE_METHOD
-        do_lower_case = True
+        do_lower_case = False
         if 'uncased' not in SCOPE_MODEL:
             do_lower_case = False
         if 'xlnet' in SCOPE_MODEL:
@@ -949,18 +949,34 @@ class Data:
             return torch.LongTensor(input_ids).to(device), torch.LongTensor(attention_masks).to(device), torch.LongTensor(mymasks).to(device)
 
         b_input_ids, b_input_mask, b_mymasks = preprocess_cue_data(self, tokenizer)
-
+        logits = []
         with torch.no_grad():
-            logits = cue_model.model(
-                b_input_ids,
-                token_type_ids=None,
-                attention_mask=b_input_mask)[0]
-            active_loss = b_input_mask.view(-1) == 1
-            # 5 is num_labels
-            active_logits = logits.view(-1,
-                                        cue_model.num_labels)[active_loss]
+            len_input = len(b_input_ids)
+            tmp_batch_len = len_input // 8
 
-        logits = logits.detach().cpu().numpy()
+            for i in range(tmp_batch_len):
+                if i != tmp_batch_len - 1:
+                    logit = cue_model.model(
+                        b_input_ids[i*8: (i+1)*8],
+                        token_type_ids=None,
+                        attention_mask=b_input_mask[i*8: (i+1)*8])[0]
+                    active_loss = b_input_mask[i*8: (i+1)*8].view(-1) == 1
+                    # 5 is num_labels
+                    active_logit = logit.view(-1,
+                                                cue_model.num_labels)[active_loss]
+                    logits.append(logit)
+                else:
+                    logit = cue_model.model(
+                        b_input_ids[i*8:],
+                        token_type_ids=None,
+                        attention_mask=b_input_mask[i*8:])[0]
+                    active_loss = b_input_mask[i*8:].view(-1) == 1
+                    # 5 is num_labels
+                    active_logit = logit.view(-1,
+                                                cue_model.num_labels)[active_loss]
+                    logits.append(logit)
+
+        logits = torch.cat(logits, dim = 0).cpu().numpy()
         mymasks = b_mymasks.to('cpu').numpy()
 
         logits = [list(p) for p in logits]
@@ -4073,6 +4089,7 @@ class CueModel:
                                                             pred_flat, average='weighted')))
 
         #self.model.load_state_dict(torch.load('checkpoint.pt'))
+        """
         plt.xlabel("Iteration")
         plt.ylabel("Train Loss")
         plt.plot([i for i in range(len(train_loss))], train_loss)
@@ -4080,6 +4097,7 @@ class CueModel:
         plt.xlabel("Iteration")
         plt.ylabel("Validation Loss")
         plt.plot([i for i in range(len(valid_loss))], valid_loss)
+        """
         return return_dict
 
     # @telegram_sender(token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID)
@@ -4525,6 +4543,7 @@ class ScopeModel:
                 break
 
         #self.model.load_state_dict(torch.load('checkpoint.pt'))
+        """
         plt.xlabel("Iteration")
         plt.ylabel("Train Loss")
         plt.plot([i for i in range(len(train_loss))], train_loss)
@@ -4532,6 +4551,7 @@ class ScopeModel:
         plt.xlabel("Iteration")
         plt.ylabel("Validation Loss")
         plt.plot([i for i in range(len(valid_loss))], valid_loss)
+        """
         return return_dict
 
     # @telegram_sender(token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID)
@@ -4996,6 +5016,7 @@ class PipelineScopeModel:
                 break
 
         #self.model.load_state_dict(torch.load('checkpoint.pt'))
+        """
         plt.xlabel("Iteration")
         plt.ylabel("Train Loss")
         plt.plot([i for i in range(len(train_loss))], train_loss)
@@ -5003,6 +5024,7 @@ class PipelineScopeModel:
         plt.xlabel("Iteration")
         plt.ylabel("Validation Loss")
         plt.plot([i for i in range(len(valid_loss))], valid_loss)
+        """
         return return_dict
 
     # @telegram_sender(token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID)
@@ -5426,8 +5448,11 @@ for run_num in range(NUM_RUNS):
             train_dl_name=','.join(TRAIN_DATASETS),
             val_dl_name=','.join(TRAIN_DATASETS))
 
+        del train_dl, val_dls, test_dls
+
         train_dl, val_dls, test_dls = first_dataset.get_scope_dataloader_pipeline(
             other_datasets=other_datasets, cue_model=cue_model)
+
 
         if 'sherlock' in TRAIN_DATASETS:
             val_dls = val_dls[:-1]
@@ -5473,11 +5498,13 @@ for run_num in range(NUM_RUNS):
             sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_scope_dataloader_pipeline(
                 test_size=0.00000001, val_size=0.00000001, other_datasets=[sherlock_test_gold_circle_data], cue_model=cue_model)
             test_dataloaders['sherlock'] = sherlock_dl
+        
+        del cue_model
         scope_model = PipelineScopeModel(
             full_finetuning=True,
             train=True,
             learning_rate=INITIAL_LEARNING_RATE,
-            cue_model=cue_model)
+            cue_model=None)
     else:
         raise ValueError(
             "Unsupported subtask. Supported values are: cue_detection, scope_resolution")
