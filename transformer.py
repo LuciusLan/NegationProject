@@ -32,11 +32,12 @@ from typing import List, Dict, Tuple, Callable, Iterator
 rouge = Rouge()
 # Imports needed
 import debugpy
+from params import param
 debugpy.debug_this_thread()
 
 MAX_LEN = 128
 bs = 8
-EPOCHS = 50
+EPOCHS = 1
 PATIENCE = 3
 INITIAL_LEARNING_RATE = 3e-5
 NUM_RUNS = 1  # Number of times to run the training and evaluation code
@@ -46,8 +47,8 @@ SCOPE_MODEL = 'bert-base-cased'  # 'bert-base-cased'
 SCOPE_METHOD = 'augment'  # Options: augment, replace
 F1_METHOD = 'average'  # Options: average, first_token
 TASK = 'negation'  # Options: negation, speculation
-SUBTASK = 'cue_detection'  # Options: cue_detection, scope_resolution
-TRAIN_DATASETS = ['bioscope_abstracts']
+SUBTASK = 'pipeline'  # Options: cue_detection, scope_resolution, pipeline
+TRAIN_DATASETS = ['sherlock']
 TEST_DATASETS = ['sfu']
 
 # TELEGRAM_CHAT_ID = #Replace with chat ID for telegram notifications
@@ -116,7 +117,7 @@ class DataLoaderN(DataLoader):
 
 
 class Data:
-    def __init__(self, file, dataset_name='sfu', frac_no_cue_sents=1.0):
+    def __init__(self, file, dataset_name='sfu', frac_no_cue_sents=1.0, cue_model=None):
         '''
         file: The path of the data file.
         dataset_name: The name of the dataset to be preprocessed. Values supported: sfu, bioscope, starsem.
@@ -866,6 +867,339 @@ class Data:
 
         return train_dataloader, val_dataloaders, test_dataloaders
 
+    def get_scope_dataloader_pipeline(
+            self,
+            val_size=0.15,
+            test_size=0.15,
+            other_datasets=[],
+            cue_model=None):
+        '''
+        This function returns the dataloader for the cue detection.
+        val_size: The size of the validation dataset (Fraction between 0 to 1)
+        test_size: The size of the test dataset (Fraction between 0 to 1)
+        other_datasets: Other datasets to use to get one combined train dataloader
+        Returns: train_dataloader, list of validation dataloaders, list of test dataloaders
+        '''
+        method = SCOPE_METHOD
+        do_lower_case = True
+        if 'uncased' not in SCOPE_MODEL:
+            do_lower_case = False
+        if 'xlnet' in SCOPE_MODEL:
+            tokenizer = XLNetTokenizer.from_pretrained(
+                SCOPE_MODEL, do_lower_case=do_lower_case, cache_dir='xlnet_tokenizer')
+        elif 'roberta' in SCOPE_MODEL:
+            tokenizer = RobertaTokenizer.from_pretrained(
+                SCOPE_MODEL, do_lower_case=do_lower_case, cache_dir='roberta_tokenizer')
+        elif 'bert' in SCOPE_MODEL:
+            tokenizer = BertTokenizer.from_pretrained(
+                SCOPE_MODEL, do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
+        elif 'bio' in SCOPE_MODEL:
+            tokenizer = AutoTokenizer.from_pretrained(
+                "monologg/biobert_v1.1_pubmed", cache_dir='biobert_tokenizer')
+
+        def preprocess_cue_data(obj, tokenizer):
+            dl_sents = obj.scope_data.sentences
+            dl_cues = obj.scope_data.cues
+
+            sentences = [" ".join(sent) for sent in dl_sents]
+
+            mytexts = []
+            mylabels = []
+            mymasks = []
+            if do_lower_case:
+                sentences_clean = [sent.lower() for sent in sentences]
+            else:
+                sentences_clean = sentences
+            for sent, tags in zip(sentences_clean, dl_cues):
+                new_tags = []
+                new_text = []
+                new_masks = []
+                for word, tag in zip(sent.split(), tags):
+                    sub_words = tokenizer._tokenize(word)
+                    for count, sub_word in enumerate(sub_words):
+                        if not isinstance(tag, int):
+                            raise ValueError(tag)
+                        mask = 1
+                        if count > 0:
+                            mask = 0
+                        new_masks.append(mask)
+                        new_tags.append(tag)
+                        new_text.append(sub_word)
+                mymasks.append(new_masks)
+                mytexts.append(new_text)
+                mylabels.append(new_tags)
+
+            input_ids = pad_sequences([[tokenizer._convert_token_to_id(word) for word in txt] for txt in mytexts],
+                                    maxlen=MAX_LEN, dtype="long", truncating="post", padding="post").tolist()
+
+            tags = pad_sequences(mylabels,
+                                maxlen=MAX_LEN, value=4, padding="post",
+                                dtype="long", truncating="post").tolist()
+
+            mymasks = pad_sequences(
+                mymasks,
+                maxlen=MAX_LEN,
+                value=0,
+                padding='post',
+                dtype='long',
+                truncating='post').tolist()
+
+            attention_masks = [[float(i > 0) for i in ii] for ii in input_ids]
+
+            return torch.LongTensor(input_ids[:5]).to(device), torch.LongTensor(attention_masks[:5]).to(device), torch.LongTensor(mymasks[:5]).to(device)
+
+        b_input_ids, b_input_mask, b_mymasks = preprocess_cue_data(self, tokenizer)
+
+        with torch.no_grad():
+            logits = cue_model.model(
+                b_input_ids,
+                token_type_ids=None,
+                attention_mask=b_input_mask)[0]
+            active_loss = b_input_mask.view(-1) == 1
+            # 5 is num_labels
+            active_logits = logits.view(-1,
+                                        cue_model.num_labels)[active_loss]
+
+        logits = logits.detach().cpu().numpy()
+        mymasks = b_mymasks.to('cpu').numpy()
+
+        logits = [list(p) for p in logits]
+
+        actual_logits = []
+
+        for l, m in zip(logits, mymasks):
+            curr_preds = []
+            my_logits = []
+            in_split = 0
+            for i, j in zip(l, m):
+                if j == 1:
+                    if in_split == 1:
+                        if len(my_logits) > 0:
+                            curr_preds.append(my_logits[-1])
+                        mode_pred = np.argmax(np.average(
+                            np.array(curr_preds), axis=0), axis=0)
+                        if len(my_logits) > 0:
+                            my_logits[-1] = mode_pred
+                        else:
+                            my_logits.append(mode_pred)
+                        curr_preds = []
+                        in_split = 0
+                    my_logits.append(np.argmax(i))
+                if j == 0:
+                    curr_preds.append(i)
+                    in_split = 1
+            if in_split == 1:
+                if len(my_logits) > 0:
+                    curr_preds.append(my_logits[-1])
+                mode_pred = np.argmax(np.average(
+                    np.array(curr_preds), axis=0), axis=0)
+                if len(my_logits) > 0:
+                    my_logits[-1] = mode_pred
+                else:
+                    my_logits.append(mode_pred)
+            actual_logits.append(my_logits)
+
+        #predictions.append(logits)
+
+        def preprocess_data(obj, tokenizer_obj, predicted_cue):
+            dl_sents = obj.scope_data.sentences
+            if predicted_cue is None:
+                dl_cues = obj.scope_data.cues
+            else:
+                dl_cues = predicted_cue#obj.scope_data.cues
+            dl_scopes = obj.scope_data.scopes
+
+            sentences = [" ".join([s for s in sent]) for sent in dl_sents]
+            mytexts = []
+            mylabels = []
+            mycues = []
+            mymasks = []
+            if do_lower_case:
+                sentences_clean = [sent.lower() for sent in sentences]
+            else:
+                sentences_clean = sentences
+
+            for sent, tags, cues in zip(sentences_clean, dl_scopes, dl_cues):
+                new_tags = []
+                new_text = []
+                new_cues = []
+                new_masks = []
+                for word, tag, cue in zip(sent.split(), tags, cues):
+                    sub_words = tokenizer_obj._tokenize(word)
+                    for count, sub_word in enumerate(sub_words):
+                        mask = 1
+                        if count > 0:
+                            mask = 0
+                        new_masks.append(mask)
+                        new_tags.append(tag)
+                        new_cues.append(cue)
+                        new_text.append(sub_word)
+                mymasks.append(new_masks)
+                mytexts.append(new_text)
+                mylabels.append(new_tags)
+                mycues.append(new_cues)
+            final_sentences = []
+            final_labels = []
+            final_masks = []
+            if method == 'replace':
+                for sent, cues in zip(mytexts, mycues):
+                    temp_sent = []
+                    for token, cue in zip(sent, cues):
+                        if cue == 3:
+                            temp_sent.append(token)
+                        else:
+                            temp_sent.append(f'[unused{cue+1}]')
+                    final_sentences.append(temp_sent)
+                final_labels = mylabels
+                final_masks = mymasks
+            elif method == 'augment':
+                for sent, cues, labels, masks in zip(
+                        mytexts, mycues, mylabels, mymasks):
+                    temp_sent = []
+                    temp_label = []
+                    temp_masks = []
+                    first_part = 0
+                    for token, cue, label, mask in zip(
+                            sent, cues, labels, masks):
+                        if cue != 3:
+                            if first_part == 0:
+                                first_part = 1
+                                temp_sent.append(f'[unused{cue+1}]')
+                                temp_masks.append(1)
+                                temp_label.append(label)
+                                temp_sent.append(token)
+                                temp_masks.append(0)
+                                temp_label.append(label)
+                                continue
+                            temp_sent.append(f'[unused{cue+1}]')
+                            temp_masks.append(0)
+                            temp_label.append(label)
+                        else:
+                            first_part = 0
+                        temp_masks.append(mask)
+                        temp_sent.append(token)
+                        temp_label.append(label)
+                    final_sentences.append(temp_sent)
+                    final_labels.append(temp_label)
+                    final_masks.append(temp_masks)
+            else:
+                raise ValueError(
+                    "Supported methods for scope detection are:\nreplace\naugment")
+            input_ids = pad_sequences([[tokenizer_obj._convert_token_to_id(word) for word in txt] for txt in final_sentences],
+                                      maxlen=MAX_LEN, dtype="long", truncating="post", padding="post").tolist()
+
+            tags = pad_sequences(final_labels,
+                                 maxlen=MAX_LEN, value=0, padding="post",
+                                 dtype="long", truncating="post").tolist()
+
+            final_masks = pad_sequences(
+                final_masks,
+                maxlen=MAX_LEN,
+                value=0,
+                padding="post",
+                dtype="long",
+                truncating="post").tolist()
+
+            attention_masks = [[float(i > 0) for i in ii] for ii in input_ids]
+
+            random_state = np.random.randint(1, 2019)
+
+            tra_inputs, test_inputs, tra_tags, test_tags = train_test_split(
+                input_ids, tags, test_size=test_size, random_state=random_state)
+            tra_masks, test_masks, _, _ = train_test_split(
+                attention_masks, input_ids, test_size=test_size, random_state=random_state)
+            tra_mymasks, test_mymasks, _, _ = train_test_split(
+                final_masks, input_ids, test_size=test_size, random_state=random_state)
+
+            random_state_2 = np.random.randint(1, 2019)
+
+            tr_inputs, val_inputs, tr_tags, val_tags = train_test_split(
+                tra_inputs, tra_tags, test_size=(val_size / (1 - test_size)), random_state=random_state_2)
+            tr_masks, val_masks, _, _ = train_test_split(tra_masks, tra_inputs, test_size=(
+                val_size / (1 - test_size)), random_state=random_state_2)
+            tr_mymasks, val_mymasks, _, _ = train_test_split(tra_mymasks, tra_inputs, test_size=(
+                val_size / (1 - test_size)), random_state=random_state_2)
+
+            return [
+                tr_inputs, tr_tags, tr_masks, tr_mymasks], [
+                val_inputs, val_tags, val_masks, val_mymasks], [
+                test_inputs, test_tags, test_masks, test_mymasks]
+
+        tr_inputs = []
+        tr_tags = []
+        tr_masks = []
+        tr_mymasks = []
+        val_inputs = [[] for i in range(len(other_datasets) + 1)]
+        test_inputs = [[] for i in range(len(other_datasets) + 1)]
+
+        train_ret_val, val_ret_val, test_ret_val = preprocess_data(
+            self, tokenizer, actual_logits)
+        tr_inputs += train_ret_val[0]
+        tr_tags += train_ret_val[1]
+        tr_masks += train_ret_val[2]
+        tr_mymasks += train_ret_val[3]
+        val_inputs[0].append(val_ret_val[0])
+        val_inputs[0].append(val_ret_val[1])
+        val_inputs[0].append(val_ret_val[2])
+        val_inputs[0].append(val_ret_val[3])
+        test_inputs[0].append(test_ret_val[0])
+        test_inputs[0].append(test_ret_val[1])
+        test_inputs[0].append(test_ret_val[2])
+        test_inputs[0].append(test_ret_val[3])
+
+        for idx, arg in enumerate(other_datasets, 1):
+            train_ret_val, val_ret_val, test_ret_val = preprocess_data(
+                arg, tokenizer, None)
+            tr_inputs += train_ret_val[0]
+            tr_tags += train_ret_val[1]
+            tr_masks += train_ret_val[2]
+            tr_mymasks += train_ret_val[3]
+            val_inputs[idx].append(val_ret_val[0])
+            val_inputs[idx].append(val_ret_val[1])
+            val_inputs[idx].append(val_ret_val[2])
+            val_inputs[idx].append(val_ret_val[3])
+            test_inputs[idx].append(test_ret_val[0])
+            test_inputs[idx].append(test_ret_val[1])
+            test_inputs[idx].append(test_ret_val[2])
+            test_inputs[idx].append(test_ret_val[3])
+
+        tr_inputs = torch.LongTensor(tr_inputs)
+        tr_tags = torch.LongTensor(tr_tags)
+        tr_masks = torch.LongTensor(tr_masks)
+        tr_mymasks = torch.LongTensor(tr_mymasks)
+        val_inputs = [[torch.LongTensor(i) for i in j] for j in val_inputs]
+        test_inputs = [[torch.LongTensor(i) for i in j] for j in test_inputs]
+
+        train_data = TensorDataset(tr_inputs, tr_masks, tr_tags, tr_mymasks)
+        train_sampler = RandomSampler(train_data)
+        train_dataloader = DataLoaderN(
+            tokenizer=tokenizer, dataset=train_data, sampler=train_sampler, batch_size=bs)
+
+        val_dataloaders = []
+        for i, j, k, l in val_inputs:
+            val_data = TensorDataset(i, k, j, l)
+            val_sampler = RandomSampler(val_data)
+            val_dataloaders.append(
+                DataLoaderN(
+                    tokenizer=tokenizer,
+                    dataset=val_data,
+                    sampler=val_sampler,
+                    batch_size=bs
+                    ))
+
+        test_dataloaders = []
+        for i, j, k, l in test_inputs:
+            test_data = TensorDataset(i, k, j, l)
+            test_sampler = RandomSampler(test_data)
+            test_dataloaders.append(
+                DataLoaderN(
+                    tokenizer=tokenizer,
+                    dataset=test_data,
+                    sampler=test_sampler,
+                    batch_size=bs
+                    ))
+
+        return train_dataloader, val_dataloaders, test_dataloaders
 
 class CustomData:
     def __init__(self, sentences, cues=None):
@@ -4419,19 +4753,486 @@ class ScopeModel:
                 predictions.append(actual_logits)
         return predictions
 
+class PipelineScopeModel:
+    def __init__(
+            self,
+            full_finetuning=True,
+            train=False,
+            pretrained_model_path='Scope_Resolution_Augment.pickle',
+            device='cuda',
+            learning_rate=3e-5,
+            cue_model=None):
+        self.model_name = SCOPE_MODEL
+        self.task = TASK
+        self.num_labels = 2
+        if train:
+            if 'xlnet' in SCOPE_MODEL:
+                self.model = XLNetForTokenClassification.from_pretrained(
+                    SCOPE_MODEL, num_labels=self.num_labels, cache_dir='xlnet-base-cased-model')
+            elif 'roberta' in SCOPE_MODEL:
+                self.model = RobertaForTokenClassification.from_pretrained(
+                    SCOPE_MODEL, num_labels=self.num_labels, cache_dir='roberta-base-model')
+            elif 'bert' in SCOPE_MODEL:
+                self.model = BertForTokenClassification.from_pretrained(
+                    SCOPE_MODEL, num_labels=self.num_labels, cache_dir='bert_base_uncased_model')
+            elif 'bio' in SCOPE_MODEL:
+                self.model = BioBertForTokenClassification.from_pretrained(
+                    "monologg/biobert_v1.1_pubmed",
+                    num_labels=self.num_labels,
+                    cache_dir='biobert_model')
+            else:
+                raise ValueError(
+                    "Supported model types are: xlnet, roberta, bert")
+        else:
+            self.model = torch.load(pretrained_model_path)
+        self.device = torch.device(device)
+        if device == 'cuda':
+            self.model.cuda()
+        else:
+            self.model.cpu()
 
-bioscope_full_papers_data = Data(
-    'bioscope\\full_papers.xml',
-    dataset_name='bioscope')
-sfu_data = Data('SFU_Review_Corpus_Negation_Speculation', dataset_name='sfu')
-bioscope_abstracts_data = Data(
-    'bioscope\\abstracts.xml',
-    dataset_name='bioscope')
+        if full_finetuning:
+            param_optimizer = list(self.model.named_parameters())
+            no_decay = ['bias', 'gamma', 'beta']
+            optimizer_grouped_parameters = [
+                {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
+                 'weight_decay_rate': 0.01},
+                {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)],
+                 'weight_decay_rate': 0.0}
+            ]
+        else:
+            param_optimizer = list(self.model.classifier.named_parameters())
+            optimizer_grouped_parameters = [
+                {"params": [p for n, p in param_optimizer]}]
+        self.optimizer = Adam(optimizer_grouped_parameters, lr=learning_rate)
+
+    # @telegram_sender(token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID)
+    def train(
+            self,
+            train_dataloader,
+            valid_dataloaders,
+            train_dl_name,
+            val_dl_name,
+            epochs=5,
+            max_grad_norm=1.0,
+            patience=3):
+        self.train_dl_name = train_dl_name
+        return_dict = {"Task": f"{self.task} Scope Resolution",
+                       "Model": self.model_name,
+                       "Train Dataset": train_dl_name,
+                       "Val Dataset": val_dl_name,
+                       "Best Precision": 0,
+                       "Best Recall": 0,
+                       "Best F1": 0}
+        train_loss = []
+        valid_loss = []
+        early_stopping = EarlyStopping(patience=patience, verbose=True)
+        loss_fn = CrossEntropyLoss()
+        for _ in tqdm(range(epochs), desc="Epoch"):
+            self.model.train()
+            tr_loss = 0
+            nb_tr_examples, nb_tr_steps = 0, 0
+            for step, batch in enumerate(train_dataloader):
+                batch = tuple(t.to(self.device) for t in batch)
+                b_input_ids, b_input_mask, b_labels, b_mymasks = batch
+                logits = self.model(b_input_ids, token_type_ids=None,
+                                    attention_mask=b_input_mask)[0]
+                active_loss = b_input_mask.view(-1) == 1
+                # 2 is num_labels
+                active_logits = logits.view(-1, self.num_labels)[active_loss]
+                active_labels = b_labels.view(-1)[active_loss]
+                loss = loss_fn(active_logits, active_labels)
+                loss.backward()
+                tr_loss += loss.item()
+                train_loss.append(loss.item())
+                if step % 100 == 0:
+                    print(f"Batch {step}, loss {loss.item()}")
+                nb_tr_examples += b_input_ids.size(0)
+                nb_tr_steps += 1
+                torch.nn.utils.clip_grad_norm_(
+                    parameters=self.model.parameters(), max_norm=max_grad_norm)
+                self.optimizer.step()
+                self.model.zero_grad()
+            print("Train loss: {}".format(tr_loss / nb_tr_steps))
+
+            self.model.eval()
+
+            eval_loss, eval_accuracy, eval_scope_accuracy = 0, 0, 0
+            nb_eval_steps, nb_eval_examples = 0, 0
+            input_tensor, predictions, true_labels, ip_mask = [], [], [], []
+            loss_fn = CrossEntropyLoss()
+            for valid_dataloader in valid_dataloaders:
+                for batch in valid_dataloader:
+                    batch = tuple(t.to(self.device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels, b_mymasks = batch
+
+                    with torch.no_grad():
+                        logits = self.model(b_input_ids, token_type_ids=None,
+                                            attention_mask=b_input_mask)[0]
+                        active_loss = b_input_mask.view(-1) == 1
+                        active_logits = logits.view(-1,
+                                                    self.num_labels)[active_loss]
+                        active_labels = b_labels.view(-1)[active_loss]
+                        tmp_eval_loss = loss_fn(active_logits, active_labels)
+
+                    logits = logits.detach().cpu().numpy()
+                    label_ids = b_labels.to('cpu').numpy()
+                    b_input_ids = b_input_ids.to('cpu').numpy()
+
+                    mymasks = b_mymasks.to('cpu').numpy()
+
+                    if F1_METHOD == 'first_token':
+
+                        logits = [list(p) for p in np.argmax(logits, axis=2)]
+                        actual_logits = []
+                        actual_label_ids = []
+                        for l, lid, m in zip(logits, label_ids, mymasks):
+                            actual_logits.append(
+                                [i for i, j in zip(l, m) if j == 1])
+                            actual_label_ids.append(
+                                [i for i, j in zip(lid, m) if j == 1])
+
+                        logits = actual_logits
+                        label_ids = actual_label_ids
+                        input_tensor.append(b_input_ids)
+                        predictions.append(logits)
+                        true_labels.append(label_ids)
+                    elif F1_METHOD == 'average':
+
+                        logits = [list(p) for p in logits]
+
+                        actual_logits = []
+                        actual_label_ids = []
+                        actual_input = []
+                        for l, lid, m, b_ii in zip(
+                                logits, label_ids, mymasks, b_input_ids):
+
+                            actual_label_ids.append(
+                                [i for i, j in zip(lid, m) if j == 1]
+                            )
+                            actual_input.append(
+                                [i for i, j in zip(b_ii, m) if j == 1]
+                            )
+                            my_logits = []
+                            curr_preds = []
+                            in_split = 0
+                            for i, j, k in zip(l, m, b_ii):
+                                '''if k == 0:
+                                    break'''
+                                if j == 1:
+                                    if in_split == 1:
+                                        if len(my_logits) > 0:
+                                            curr_preds.append(my_logits[-1])
+                                        mode_pred = np.argmax(np.average(
+                                            np.array(curr_preds), axis=0), axis=0)
+                                        if len(my_logits) > 0:
+                                            my_logits[-1] = mode_pred
+                                        else:
+                                            my_logits.append(mode_pred)
+                                        curr_preds = []
+                                        in_split = 0
+                                    my_logits.append(np.argmax(i))
+                                if j == 0:
+                                    curr_preds.append(i)
+                                    in_split = 1
+                            if in_split == 1:
+                                if len(my_logits) > 0:
+                                    curr_preds.append(my_logits[-1])
+                                mode_pred = np.argmax(np.average(
+                                    np.array(curr_preds), axis=0), axis=0)
+                                if len(my_logits) > 0:
+                                    my_logits[-1] = mode_pred
+                                else:
+                                    my_logits.append(mode_pred)
+                            actual_logits.append(my_logits)
+                        input_tensor.append(actual_input)
+                        predictions.append(actual_logits)
+                        true_labels.append(actual_label_ids)
+
+                    tmp_eval_accuracy = flat_accuracy(
+                        actual_logits, actual_label_ids)
+                    tmp_eval_scope_accuracy = scope_accuracy(
+                        actual_logits, actual_label_ids)
+                    eval_scope_accuracy += tmp_eval_scope_accuracy
+                    valid_loss.append(tmp_eval_loss.mean().item())
+
+                    eval_loss += tmp_eval_loss.mean().item()
+                    eval_accuracy += tmp_eval_accuracy
+
+                    nb_eval_examples += len(b_input_ids)
+                    nb_eval_steps += 1
+                eval_loss = eval_loss / nb_eval_steps
+                
+            print("Validation loss: {}".format(eval_loss))
+            print(
+                "Validation Accuracy: {}".format(
+                    eval_accuracy /
+                    nb_eval_steps))
+            print(
+                "Validation Accuracy Scope Level: {}".format(
+                    eval_scope_accuracy /
+                    nb_eval_steps))
+            r_scope(input_tensor, true_labels, predictions, tokenizer=valid_dataloader.tokenizer)
+            f1_scope([j for i in true_labels for j in i], [
+                     j for i in predictions for j in i], level='scope')
+            labels_flat = [
+                l_ii for l in true_labels for l_i in l for l_ii in l_i]
+            pred_flat = [
+                p_ii for p in predictions for p_i in p for p_ii in p_i]
+            classification_dict = classification_report(
+                labels_flat, pred_flat, output_dict=True)
+            p = classification_dict["1"]["precision"]
+            r = classification_dict["1"]["recall"]
+            f1 = classification_dict["1"]["f1-score"]
+            if f1 > return_dict['Best F1']:
+                return_dict['Best F1'] = f1
+                return_dict['Best Precision'] = p
+                return_dict['Best Recall'] = r
+            print("F1-Score Token: {}".format(f1))
+            print(classification_report(labels_flat, pred_flat))
+            early_stopping(f1, self.model)
+            if early_stopping.early_stop:
+                print("Early stopping")
+                break
+
+        #self.model.load_state_dict(torch.load('checkpoint.pt'))
+        plt.xlabel("Iteration")
+        plt.ylabel("Train Loss")
+        plt.plot([i for i in range(len(train_loss))], train_loss)
+        plt.figure()
+        plt.xlabel("Iteration")
+        plt.ylabel("Validation Loss")
+        plt.plot([i for i in range(len(valid_loss))], valid_loss)
+        return return_dict
+
+    # @telegram_sender(token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID)
+    def evaluate(self, test_dataloader, test_dl_name="SFU"):
+        return_dict = {"Task": f"{self.task} Scope Resolution",
+                       "Model": self.model_name,
+                       "Train Dataset": self.train_dl_name,
+                       "Test Dataset": test_dl_name,
+                       "Precision": 0,
+                       "Recall": 0,
+                       "F1": 0}
+        self.model.eval()
+        eval_loss, eval_accuracy, eval_scope_accuracy = 0, 0, 0
+        nb_eval_steps, nb_eval_examples = 0, 0
+        predictions, true_labels, ip_mask, input_tensor = [], [], [], []
+        loss_fn = CrossEntropyLoss()
+        for batch in test_dataloader:
+            batch = tuple(t.to(self.device) for t in batch)
+            b_input_ids, b_input_mask, b_labels, b_mymasks = batch
+
+            with torch.no_grad():
+                logits = self.model(b_input_ids, token_type_ids=None,
+                                    attention_mask=b_input_mask)[0]
+                active_loss = b_input_mask.view(-1) == 1
+                # 5 is num_labels
+                active_logits = logits.view(-1, self.num_labels)[active_loss]
+                active_labels = b_labels.view(-1)[active_loss]
+                tmp_eval_loss = loss_fn(active_logits, active_labels)
+
+            logits = logits.detach().cpu().numpy()
+            label_ids = b_labels.to('cpu').numpy()
+            b_input_ids = b_input_ids.to('cpu').numpy()
+
+            mymasks = b_mymasks.to('cpu').numpy()
+
+            if F1_METHOD == 'first_token':
+
+                logits = [list(p) for p in np.argmax(logits, axis=2)]
+                actual_logits = []
+                actual_label_ids = []
+                actual_input = []
+                for l, lid, m in zip(logits, label_ids, mymasks):
+                    actual_logits.append([i for i, j in zip(l, m) if j == 1])
+                    actual_label_ids.append(
+                        [i for i, j in zip(lid, m) if j == 1]
+                    )
+                    actual_input.append(
+                                [i for i, j in zip(b_ii, m) if j == 1]
+                    )
+
+                logits = actual_logits
+                label_ids = actual_label_ids
+
+                predictions.append(logits)
+                true_labels.append(label_ids)
+                input_tensor.append(actual_input)
+
+            elif F1_METHOD == 'average':
+
+                logits = [list(p) for p in logits]
+
+                actual_logits = []
+                actual_label_ids = []
+                actual_input = []
+
+                for l, lid, m, b_ii in zip(
+                        logits, label_ids, mymasks, b_input_ids):
+
+                    actual_label_ids.append(
+                        [i for i, j in zip(lid, m) if j == 1])
+                    actual_input.append(
+                        [i for i, j in zip(b_ii, m) if j == 1]
+                    )
+                    my_logits = []
+                    curr_preds = []
+                    in_split = 0
+                    for i, j, k in zip(l, m, b_ii):
+                        '''if k == 0:
+                            break'''
+                        if j == 1:
+                            if in_split == 1:
+                                if len(my_logits) > 0:
+                                    curr_preds.append(my_logits[-1])
+                                mode_pred = np.argmax(np.average(
+                                    np.array(curr_preds), axis=0), axis=0)
+                                if len(my_logits) > 0:
+                                    my_logits[-1] = mode_pred
+                                else:
+                                    my_logits.append(mode_pred)
+                                curr_preds = []
+                                in_split = 0
+                            my_logits.append(np.argmax(i))
+                        if j == 0:
+                            curr_preds.append(i)
+                            in_split = 1
+                    if in_split == 1:
+                        if len(my_logits) > 0:
+                            curr_preds.append(my_logits[-1])
+                        mode_pred = np.argmax(
+                            np.average(
+                                np.array(curr_preds),
+                                axis=0),
+                            axis=0)
+                        if len(my_logits) > 0:
+                            my_logits[-1] = mode_pred
+                        else:
+                            my_logits.append(mode_pred)
+                    actual_logits.append(my_logits)
+
+                predictions.append(actual_logits)
+                true_labels.append(actual_label_ids)
+                input_tensor.append(actual_input)
+
+            tmp_eval_accuracy = flat_accuracy(actual_logits, actual_label_ids)
+            tmp_eval_scope_accuracy = scope_accuracy(
+                actual_logits, actual_label_ids)
+            eval_scope_accuracy += tmp_eval_scope_accuracy
+
+            eval_loss += tmp_eval_loss.mean().item()
+            eval_accuracy += tmp_eval_accuracy
+
+            nb_eval_examples += len(b_input_ids)
+            nb_eval_steps += 1
+        eval_loss = eval_loss / nb_eval_steps
+        print("Validation loss: {}".format(eval_loss))
+        print("Validation Accuracy: {}".format(eval_accuracy / nb_eval_steps))
+        print(
+            "Validation Accuracy Scope Level: {}".format(
+                eval_scope_accuracy /
+                nb_eval_steps))
+        f1_scope([j for i in true_labels for j in i], [
+                 j for i in predictions for j in i], level='scope')
+        r_scope(input_tensor, true_labels, predictions, tokenizer=test_dataloader.tokenizer)
+        labels_flat = [l_ii for l in true_labels for l_i in l for l_ii in l_i]
+        pred_flat = [p_ii for p in predictions for p_i in p for p_ii in p_i]
+        classification_dict = classification_report(
+            labels_flat, pred_flat, output_dict=True)
+        p = classification_dict["1"]["precision"]
+        r = classification_dict["1"]["recall"]
+        f1 = classification_dict["1"]["f1-score"]
+        return_dict['Precision'] = p
+        return_dict['Recall'] = r
+        return_dict['F1'] = f1
+        print("Classification Report:")
+        print(classification_report(labels_flat, pred_flat))
+        return return_dict
+
+    def predict(self, dataloader):
+        self.model.eval()
+        predictions, ip_mask = [], []
+        for batch in dataloader:
+            batch = tuple(t.to(self.device) for t in batch)
+            b_input_ids, b_input_mask, b_mymasks = batch
+
+            with torch.no_grad():
+                logits = self.model(
+                    b_input_ids,
+                    token_type_ids=None,
+                    attention_mask=b_input_mask)[0]
+            logits = logits.detach().cpu().numpy()
+            mymasks = b_mymasks.to('cpu').numpy()
+
+            if F1_METHOD == 'first_token':
+
+                logits = [list(p) for p in np.argmax(logits, axis=2)]
+                actual_logits = []
+                for l, lid, m in zip(logits, label_ids, mymasks):
+                    actual_logits.append([i for i, j in zip(l, m) if j == 1])
+
+                logits = actual_logits
+                label_ids = actual_label_ids
+
+                predictions.append(logits)
+                true_labels.append(label_ids)
+
+            elif F1_METHOD == 'average':
+
+                logits = [list(p) for p in logits]
+
+                actual_logits = []
+
+                for l, m in zip(logits, mymasks):
+
+                    my_logits = []
+                    curr_preds = []
+                    in_split = 0
+                    for i, j in zip(l, m):
+
+                        if j == 1:
+                            if in_split == 1:
+                                if len(my_logits) > 0:
+                                    curr_preds.append(my_logits[-1])
+                                mode_pred = np.argmax(np.average(
+                                    np.array(curr_preds), axis=0), axis=0)
+                                if len(my_logits) > 0:
+                                    my_logits[-1] = mode_pred
+                                else:
+                                    my_logits.append(mode_pred)
+                                curr_preds = []
+                                in_split = 0
+                            my_logits.append(np.argmax(i))
+                        if j == 0:
+                            curr_preds.append(i)
+                            in_split = 1
+                    if in_split == 1:
+                        if len(my_logits) > 0:
+                            curr_preds.append(my_logits[-1])
+                        mode_pred = np.argmax(
+                            np.average(
+                                np.array(curr_preds),
+                                axis=0),
+                            axis=0)
+                        if len(my_logits) > 0:
+                            my_logits[-1] = mode_pred
+                        else:
+                            my_logits.append(mode_pred)
+                    actual_logits.append(my_logits)
+
+                predictions.append(actual_logits)
+        return predictions
+
+
+bioscope_full_papers_data = Data(param.data_path['bioscope_full'], dataset_name='bioscope')
+sfu_data = Data(param.data_path['sfu'], dataset_name='sfu')
+bioscope_abstracts_data = Data(param.data_path['bioscope_abstracts'], dataset_name='bioscope')
 # if TASK == 'negation':
-sherlock_train_data = Data('starsem-st-2012-data\\cd-sco\\corpus\\training\\SEM-2012-SharedTask-CD-SCO-training-09032012.txt', dataset_name='starsem')
-sherlock_dev_data = Data('starsem-st-2012-data\\cd-sco\\corpus\\dev\\SEM-2012-SharedTask-CD-SCO-dev-09032012.txt', dataset_name='starsem')
-sherlock_test_gold_cardboard_data = Data('starsem-st-2012-data\\cd-sco\\corpus\\test-gold\\SEM-2012-SharedTask-CD-SCO-test-cardboard-GOLD.txt', dataset_name='starsem')
-sherlock_test_gold_circle_data = Data('starsem-st-2012-data\\cd-sco\\corpus\\test-gold\\SEM-2012-SharedTask-CD-SCO-test-circle-GOLD.txt', dataset_name='starsem')
+sherlock_train_data = Data(param.data_path['starsem']['train'], dataset_name='starsem')
+sherlock_dev_data = Data(param.data_path['starsem']['dev'], dataset_name='starsem')
+sherlock_test_gold_cardboard_data = Data(param.data_path['starsem']['test1'], dataset_name='starsem')
+sherlock_test_gold_circle_data = Data(param.data_path['starsem']['test2'], dataset_name='starsem')
 
 for run_num in range(NUM_RUNS):
     first_dataset = None
@@ -4549,6 +5350,54 @@ for run_num in range(NUM_RUNS):
             sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_scope_dataloader(
                 test_size=0.00000001, val_size=0.00000001, other_datasets=[sherlock_test_gold_circle_data])
             test_dataloaders['sherlock'] = sherlock_dl
+
+    elif SUBTASK == 'pipeline':
+        train_dl, val_dls, test_dls = first_dataset.get_cue_dataloader(
+            other_datasets=other_datasets)
+        if 'sherlock' in TRAIN_DATASETS:
+            val_dls = val_dls[:-1]
+            append_dl, _, _ = sherlock_dev_data.get_cue_dataloader(
+                test_size=0.00000001, val_size=0.00000001)
+            val_dls.append(append_dl)
+            test_dls = test_dls[:-1]
+            sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_cue_dataloader(
+                test_size=0.00000001, val_size=0.00000001, other_datasets=[sherlock_test_gold_circle_data])
+            test_dls.append(sherlock_dl)
+
+        test_dataloaders = {}
+        idx = 0
+        if 'sfu' in TRAIN_DATASETS:
+            if 'sfu' in TEST_DATASETS:
+                test_dataloaders['sfu'] = test_dls[idx]
+            idx += 1
+        elif 'sfu' in TEST_DATASETS:
+            sfu_dl, _, _ = sfu_data.get_cue_dataloader(
+                test_size=0.7, val_size=0.00000001)
+            test_dataloaders['sfu'] = sfu_dl
+        if 'bioscope_full_papers' in TRAIN_DATASETS:
+            if 'bioscope_full_papers' in TEST_DATASETS:
+                test_dataloaders['bioscope_full_papers'] = test_dls[idx]
+            idx += 1
+        elif 'bioscope_full_papers' in TEST_DATASETS:
+            bioscope_full_papers_dl, _, _ = bioscope_full_papers_data.get_cue_dataloader(
+                test_size=0.7, val_size=0.00000001)
+            test_dataloaders['bioscope_full_papers'] = bioscope_full_papers_dl
+        if 'bioscope_abstracts' in TRAIN_DATASETS:
+            if 'bioscope_abstracts' in TEST_DATASETS:
+                test_dataloaders['bi oscope_abstracts'] = test_dls[idx]
+            idx += 1
+        elif 'bioscope_abstracts' in TEST_DATASETS:
+            bioscope_abstracts_dl, _, _ = bioscope_abstracts_data.get_cue_dataloader(
+                test_size=0.7, val_size=0.00000001)
+            test_dataloaders['bioscope_abstracts'] = bioscope_abstracts_dl
+        if 'sherlock' in TRAIN_DATASETS:
+            if 'sherlock' in TEST_DATASETS:
+                test_dataloaders['sherlock'] = test_dls[idx]
+            idx += 1
+        elif 'sherlock' in TEST_DATASETS:
+            sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_cue_dataloader(
+                test_size=0.00000001, val_size=0.00000001, other_datasets=[sherlock_test_gold_circle_data])
+            test_dataloaders['sherlock'] = sherlock_dl
     else:
         raise ValueError(
             "Unsupported subtask. Supported values are: cue_detection, scope_resolution")
@@ -4563,20 +5412,98 @@ for run_num in range(NUM_RUNS):
             full_finetuning=True,
             train=True,
             learning_rate=INITIAL_LEARNING_RATE)
+    elif SUBTASK == 'pipeline':
+        cue_model = CueModel(
+            full_finetuning=True,
+            train=True,
+            learning_rate=INITIAL_LEARNING_RATE)
+        
+        cue_model.train(
+            train_dl,
+            val_dls,
+            epochs=EPOCHS,
+            patience=PATIENCE,
+            train_dl_name=','.join(TRAIN_DATASETS),
+            val_dl_name=','.join(TRAIN_DATASETS))
+
+        train_dl, val_dls, test_dls = first_dataset.get_scope_dataloader_pipeline(
+            other_datasets=other_datasets, cue_model=cue_model)
+
+        if 'sherlock' in TRAIN_DATASETS:
+            val_dls = val_dls[:-1]
+            append_dl, _, _ = sherlock_dev_data.get_scope_dataloader_pipeline(
+                test_size=0.00000001, val_size=0.00000001, cue_model=cue_model)
+            val_dls.append(append_dl)
+            test_dls = test_dls[:-1]
+            sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_scope_dataloader_pipeline(
+                test_size=0.00000001, val_size=0.00000001, other_datasets=[sherlock_test_gold_circle_data], cue_model=cue_model)
+            test_dls.append(sherlock_dl)
+
+        test_dataloaders = {}
+        idx = 0
+        if 'sfu' in TRAIN_DATASETS:
+            if 'sfu' in TEST_DATASETS:
+                test_dataloaders['sfu'] = test_dls[idx]
+            idx += 1
+        elif 'sfu' in TEST_DATASETS:
+            sfu_dl, _, _ = sfu_data.get_scope_dataloader_pipeline(
+                test_size=0.7, val_size=0.00000001, cue_model=cue_model)
+            test_dataloaders['sfu'] = sfu_dl
+        if 'bioscope_full_papers' in TRAIN_DATASETS:
+            if 'bioscope_full_papers' in TEST_DATASETS:
+                test_dataloaders['bioscope_full_papers'] = test_dls[idx]
+            idx += 1
+        elif 'bioscope_full_papers' in TEST_DATASETS:
+            bioscope_full_papers_dl, _, _ = bioscope_full_papers_data.get_scope_dataloader_pipeline(
+                test_size=0.7, val_size=0.00000001, cue_model=cue_model)
+            test_dataloaders['bioscope_full_papers'] = bioscope_full_papers_dl
+        if 'bioscope_abstracts' in TRAIN_DATASETS:
+            if 'bioscope_abstracts' in TEST_DATASETS:
+                test_dataloaders['bioscope_abstracts'] = test_dls[idx]
+            idx += 1
+        elif 'bioscope_abstracts' in TEST_DATASETS:
+            bioscope_abstracts_dl, _, _ = bioscope_abstracts_data.get_scope_dataloader_pipeline(
+                test_size=0.7, val_size=0.00000001, cue_model=cue_model)
+            test_dataloaders['bioscope_abstracts'] = bioscope_abstracts_dl
+        if 'sherlock' in TRAIN_DATASETS:
+            if 'sherlock' in TEST_DATASETS:
+                test_dataloaders['sherlock'] = test_dls[idx]
+            idx += 1
+        elif 'sherlock' in TEST_DATASETS:
+            sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_scope_dataloader_pipeline(
+                test_size=0.00000001, val_size=0.00000001, other_datasets=[sherlock_test_gold_circle_data], cue_model=cue_model)
+            test_dataloaders['sherlock'] = sherlock_dl
+        scope_model = PipelineScopeModel(
+            full_finetuning=True,
+            train=True,
+            learning_rate=INITIAL_LEARNING_RATE,
+            cue_model=cue_model)
     else:
         raise ValueError(
             "Unsupported subtask. Supported values are: cue_detection, scope_resolution")
+    if SUBTASK != 'pipeline':
+        model.train(
+            train_dl,
+            val_dls,
+            epochs=EPOCHS,
+            patience=PATIENCE,
+            train_dl_name=','.join(TRAIN_DATASETS),
+            val_dl_name=','.join(TRAIN_DATASETS))
+    else:
+        scope_model.train(
+            train_dl,
+            val_dls,
+            epochs=EPOCHS,
+            patience=PATIENCE,
+            train_dl_name=','.join(TRAIN_DATASETS),
+            val_dl_name=','.join(TRAIN_DATASETS))
 
-    model.train(
-        train_dl,
-        val_dls,
-        epochs=EPOCHS,
-        patience=PATIENCE,
-        train_dl_name=','.join(TRAIN_DATASETS),
-        val_dl_name=','.join(TRAIN_DATASETS))
 
     for k in test_dataloaders.keys():
         print(f"Evaluate on {k}:")
-        model.evaluate(test_dataloaders[k], test_dl_name=k)
+        if SUBTASK != 'pipeline':
+            model.evaluate(test_dataloaders[k], test_dl_name=k)
+        else:
+            scope_model.evaluate(test_dataloaders[k], test_dl_name=k)
 
     print(f"\n\n************ RUN {run_num+1} DONE! **************\n\n")
