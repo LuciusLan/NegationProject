@@ -37,7 +37,7 @@ debugpy.debug_this_thread()
 
 MAX_LEN = 128
 bs = 8
-EPOCHS = 1
+EPOCHS = 50
 PATIENCE = 3
 INITIAL_LEARNING_RATE = 3e-5
 NUM_RUNS = 1  # Number of times to run the training and evaluation code
@@ -56,11 +56,11 @@ TEST_DATASETS = ['sfu']
 
 
 BERT_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-    'bert-base-uncased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-uncased-config.json"
+    'bert-base-cased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-config.json"
 }
 
 BERT_PRETRAINED_MODEL_ARCHIVE_MAP = {
-    'bert-base-uncased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-uncased-pytorch_model.bin"
+    'bert-base-cased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-uncased-pytorch_model.bin"
 }
 
 ROBERTA_PRETRAINED_MODEL_ARCHIVE_MAP = {
@@ -946,7 +946,7 @@ class Data:
 
             attention_masks = [[float(i > 0) for i in ii] for ii in input_ids]
 
-            return torch.LongTensor(input_ids[:5]).to(device), torch.LongTensor(attention_masks[:5]).to(device), torch.LongTensor(mymasks[:5]).to(device)
+            return torch.LongTensor(input_ids).to(device), torch.LongTensor(attention_masks).to(device), torch.LongTensor(mymasks).to(device)
 
         b_input_ids, b_input_mask, b_mymasks = preprocess_cue_data(self, tokenizer)
 
