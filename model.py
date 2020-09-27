@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import data
 import numpy as np
 from params import param
+import crf
 device = torch.device('cuda')
 
 class Neg(nn.Module):
@@ -27,7 +28,12 @@ class Neg(nn.Module):
         self.init_embedding(self.cue_emb)
         if self.position_emb_dim != 0:
             self.position_emb = nn.Embedding(1, 10)
-        self.word_lstm = nn.GRU(self.cue_emb_dim + self.word_emb_dim, self.hidden_dim, bidirectional=True, batch_first=True)
+        if param.gru_or_lstm == "LSTM":
+            self.word_lstm = nn.LSTM(self.cue_emb_dim + self.word_emb_dim, self.hidden_dim, bidirectional=True, batch_first=True)
+        elif param.gru_or_lstm == "GRU":
+            self.word_lstm = nn.GRU(self.cue_emb_dim + self.word_emb_dim, self.hidden_dim, bidirectional=True, batch_first=True)
+        else:
+            raise NameError("Encoder must be either LSTM or GRU")
         self.init_lstm(self.word_lstm)
         self.dropout = nn.Dropout(p=param.dropout)
         self.linear = nn.Linear(self.hidden_dim*2, self.label_dim)
@@ -35,6 +41,9 @@ class Neg(nn.Module):
         self.label_emb = nn.Embedding(self.label_dim, self.hidden_dim*2)
         self.init_embedding(self.label_emb)
         self.cel = nn.CrossEntropyLoss(ignore_index=0)
+        if param.use_crf is True:
+            label2id = {label: i for i, label in enumerate(range(param.label_dim-2))}
+            self.crf = crf.CRF(tagset_size=param.label_dim, tag_dictionary=label2id, device='cpu', is_bert=False)
 
         if param.encoder_attention is None:
             pass
@@ -79,17 +88,24 @@ class Neg(nn.Module):
                 self.init_linear(self.fc[3])
                 self.init_linear(self.fc[6])
             elif param.decoder_attention == 'multihead':
-                self.attn = MultiHeadAttention(self.hidden_dim*2, num_heads=param.num_attention_head, dropout_rate=param.dropout)
+                self.attn = MultiHeadAttention_S(self.hidden_dim*2, num_heads=param.num_attention_head, dropout_rate=param.dropout)
                 self.init_linear(self.attn.linear_q)
                 self.init_linear(self.attn.linear_k)
                 self.init_linear(self.attn.linear_v)
-                """
+                self.ff = FeedForward(self.hidden_dim*2, 1024)
+                self.init_linear(self.ff.linear1)
+                self.init_linear(self.ff.linear2)
+            elif param.decoder_attention == 'label':
+                self.attn = MultiHeadAttention_L(self.hidden_dim*2, num_heads=param.num_attention_head, dropout_rate=param.dropout)
+                self.attn_last = MultiHeadAttention_L(self.hidden_dim*2, num_heads=1, dropout_rate=0)
                 self.init_linear(self.attn.Q_proj[0])
                 self.init_linear(self.attn.K_proj[0])
-                self.init_linear(self.attn.V_proj[0]) """
-                self.fc = nn.Linear(self.hidden_dim*4, self.hidden_dim*2, bias=False)
-                self.init_linear(self.fc)
-                self.ff = FeedForward(self.hidden_dim*2, 1024)
+                self.init_linear(self.attn.V_proj[0])
+                self.init_linear(self.attn_last.Q_proj[0])
+                self.init_linear(self.attn_last.K_proj[0])
+                self.init_linear(self.attn_last.V_proj[0])
+                self.ll = nn.GRU(self.hidden_dim*4, self.hidden_dim, batch_first=True, bidirectional=True)
+                self.init_lstm(self.ll)
 
     
     def load_pretrained_word_embedding(self, pre_word_embeddings):
@@ -111,11 +127,12 @@ class Neg(nn.Module):
             input_label_seq_tensor[i, :param.label_dim] = torch.LongTensor([i for i in range(param.label_dim)])
         label_emb = self.label_emb(input_label_seq_tensor)
         if param.encoder_attention is None:
+            #embeds = word_emb
             embeds = torch.cat((word_emb, cue_emb), 2)
         else:
             projected = []
             projected.append(self.projectors['word'](word_emb))
-            projected.append(self.projectors['cue'](cue_emb))
+            #projected.append(self.projectors['cue'](cue_emb))
             projected_cat = torch.cat([p for p in projected], 2)
             if param.encoder_attention.startswith('meta'):
                 m_attn = self.attn_1(self.attn_0(projected_cat)[0])
@@ -133,6 +150,7 @@ class Neg(nn.Module):
         
         if param.decoder_attention is None:
             fc_output = self.dropout(unpad_outputs)
+            fc_output = self.linear(fc_output)
         else:
             if param.decoder_attention == 'simple':
                 attn = self.fc(unpad_outputs) # attention over the sequence length
@@ -144,27 +162,36 @@ class Neg(nn.Module):
             elif param.decoder_attention == 'multihead':
                 #unpad_outputs = self.dropout(unpad_outputs.transpose(1, 0))
                 #attn_mask = self.attention_padding_mask(input_[0], input_[2], 0)
-                attn_out, _ = self.attn(label_emb, unpad_outputs, unpad_outputs, None)
+                attn_out, _ = self.attn(unpad_outputs, unpad_outputs, unpad_outputs, None)
                 #fc_output = torch.cat([unpad_outputs, attn_out], -1)
                 fc_output = self.ff(attn_out)
                 fc_output = self.dropout(fc_output)
-                """
+                fc_output = self.linear(fc_output)
+            elif param.decoder_attention == 'label':
                 #unpad_outputs = self.dropout(unpad_outputs.transpose(1, 0))
                 attn_out = self.attn(unpad_outputs, label_emb, label_emb, False)
-                fc_output = torch.cat([unpad_outputs, attn_out], -1)
-                fc_output = self.fc(fc_output)
-                fc_output = self.dropout(fc_output)"""
+                ll_output = torch.cat([unpad_outputs, attn_out], -1)
+                ll_output = torch.nn.utils.rnn.pack_padded_sequence(ll_output, input_[3], batch_first=True, enforce_sorted=False)
+                ll_output, _ = self.ll(ll_output)
+                ll_output, unpad_output_lengths = torch.nn.utils.rnn.pad_packed_sequence(ll_output, batch_first=True, total_length=param.max_len)
 
-        lin_out = self.linear(fc_output)
-        out = F.log_softmax(lin_out, dim=1)
+                fc_output = self.attn_last(ll_output, label_emb, label_emb, True)
+                #fc_output = self.dropout(fc_output)
+
+        out = F.log_softmax(fc_output, dim=-1)
         return out
     
     def forward(self, input_batch, targets):
         logits = self.lstm_output(input_batch)
         loss = 0.0
         targets = torch.autograd.Variable(targets)
-        for i in range(len(targets)):
-            loss += F.cross_entropy(logits[i], targets[i])
+        if param.use_crf is True:
+            self.crf = self.crf.cpu()
+            loss += self.crf.calculate_loss(logits, tag_list=targets, lengths=input_batch[3])
+            loss = loss.cuda()
+        else:
+            for i in range(len(targets)):
+                loss += F.cross_entropy(logits[i], targets[i])
         return loss
     
     def init_embedding(self, input_):
@@ -250,8 +277,8 @@ class ScaledDotProductAttention(nn.Module):
 
         return output, attention
 
-"""
-class MultiHeadAttention(nn.Module):
+
+class MultiHeadAttention_L(nn.Module):
 
     def __init__(self, num_units, num_heads=1, dropout_rate=0, gpu=True, causality=False):
         '''Applies multihead attention.
@@ -261,7 +288,7 @@ class MultiHeadAttention(nn.Module):
             causality: Boolean. If true, units that reference the future are masked.
             num_heads: An int. Number of heads.
         '''
-        super(MultiHeadAttention, self).__init__()
+        super(MultiHeadAttention_L, self).__init__()
         self.gpu = gpu
         self.num_units = num_units
         self.num_heads = num_heads
@@ -314,9 +341,9 @@ class MultiHeadAttention(nn.Module):
         outputs += queries
 
         return outputs
-"""
 
-class MultiHeadAttention(nn.Module):
+
+class MultiHeadAttention_S(nn.Module):
 
     def __init__(self, model_dim=512, num_heads=8, dropout_rate=0.0, attention_type='scaled_dot'):
         super().__init__()
@@ -390,3 +417,4 @@ class FeedForward(nn.Module):
 
         output = self.norm(output + x)
         return output
+
