@@ -148,7 +148,7 @@ class Data(object):
             starsem_cues = (data+cue_only_sents, labels+cue_only_cues)
             starsem_scopes = (scope_sents, scope_cues, data_scope)
             starsem_scopes_unique = [[], [], []]
-            for n, i in enumerate(starsem_scopes[0]):
+            """for n, i in enumerate(starsem_scopes[0]):
                 if i not in starsem_scopes[0][:n]:
                     starsem_scopes_unique[0].append(i)
                     starsem_scopes_unique[1].append(starsem_scopes[1][n])
@@ -156,9 +156,13 @@ class Data(object):
                     if param.label_dim == 4:
                         for p, e in enumerate(starsem_scopes[1][n]):
                             if e == 1 or e == 0:
-                                starsem_scopes_unique[2][-1][p] = 3
-                    
-            return [starsem_cues, starsem_scopes_unique]
+                                starsem_scopes_unique[2][-1][p] = 3"""
+            if param.label_dim == 4:
+                for ci, c in enumerate(starsem_scopes[1]):
+                    for i, e in enumerate(c):
+                        if e == 0 or e == 1 or e == 2:
+                            starsem_scopes[2][ci][i] = 3
+            return [starsem_cues, starsem_scopes]
 
         def bioscope(f_path, cue_sents_only=cue_sents_only, frac_no_cue_sents=1.0):
             file = open(f_path, encoding='utf-8')
@@ -253,7 +257,7 @@ class Data(object):
             if param.label_dim == 4:
                 for ci, c in enumerate(scope_cues):
                     for i, e in enumerate(c):
-                        if e == 1:
+                        if e == 0 or e == 1 or e == 2:
                             scope_scopes[ci][i] = 3
             return [(cue_sentence+cue_only_sents, cue_cues+cue_only_cues), (scope_sentence, scope_cues, scope_scopes)]
 
@@ -351,7 +355,7 @@ class Data(object):
             if param.label_dim == 4:
                 for ci, c in enumerate(scope_cues):
                     for i, e in enumerate(c):
-                        if e == 1:
+                        if e == 0 or e == 1 or e == 2:
                             scope_scopes[ci][i] = 3
 
             return [(cue_sentence+cue_only_sents, cue_cues+cue_only_cues), (scope_sentence, scope_cues, scope_scopes)]
@@ -826,7 +830,7 @@ class GetDataLoader(object):
         input_ids = torch.LongTensor(input_ids)
         cue_pad = torch.LongTensor(cue_pad)
         scope_pad = torch.LongTensor(scope_pad)
-        sent_length = torch.IntTensor(sent_length)
+        sent_length = torch.LongTensor(sent_length)
         
         dataset = TensorDataset(input_ids, cue_pad, scope_pad, sent_length)
         sampler = RandomSampler(dataset)
