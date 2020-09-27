@@ -9,8 +9,9 @@ class Param(object):
         self.num_ep = 200
         self.lr = 5e-5
         self.early_stop_thres = 15
-        self.cross_test = True
-        self.gru_or_lstm = 'GRU'
+        self.cross_test = False
+        self.excess_train = True
+        self.gru_or_lstm = 'LSTM'
         self.dataset_name = 'starsem' #Available options: 'bioscope_full', 'bioscope_abstracts', 'starsem', 'sfu'
         self.data_path = {
             'sfu': 'SFU_Review_Corpus_Negation_Speculation',
@@ -35,17 +36,21 @@ class Param(object):
         self.position_emb_dim = 0
         self.hidden_dim = 200
         self.dropout = 0.5
-        self.label_dim = 4
+        self.label_dim = 3
         self.encoder_attention = None # 'softmax' or 'meta'
-        self.decoder_attention = 'multihead' # 'simple' or 'multihead'
-        self.num_attention_head = 5
+        self.decoder_attention = None # 'simple', 'multihead', 'label'
+        self.num_attention_head = 8
+        self.external_vocab = False
+        self.use_crf = False
+        if self.use_crf is True:
+            self.label_dim += 2
 
         self.BERT_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-            'bert-base-uncased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-uncased-config.json"
+            'bert-base-cased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-config.json"
         }
 
         self.BERT_PRETRAINED_MODEL_ARCHIVE_MAP = {
-            'bert-base-uncased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-uncased-pytorch_model.bin"
+            'bert-base-cased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-pytorch_model.bin"
         }
         self.config = 'config.json'
 
