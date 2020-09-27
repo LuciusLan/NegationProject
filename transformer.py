@@ -38,7 +38,7 @@ debugpy.debug_this_thread()
 MAX_LEN = 128
 bs = 8
 EPOCHS = 50
-PATIENCE = 3
+PATIENCE = 5
 INITIAL_LEARNING_RATE = 3e-5
 NUM_RUNS = 1  # Number of times to run the training and evaluation code
 
@@ -49,7 +49,7 @@ F1_METHOD = 'average'  # Options: average, first_token
 TASK = 'negation'  # Options: negation, speculation
 SUBTASK = 'pipeline'  # Options: cue_detection, scope_resolution, pipeline
 TRAIN_DATASETS = ['sherlock']
-TEST_DATASETS = ['sfu']
+TEST_DATASETS = ['sherlock']
 
 # TELEGRAM_CHAT_ID = #Replace with chat ID for telegram notifications
 # TELEGRAM_TOKEN = #Replace with token for telegram notifications
@@ -236,13 +236,21 @@ class Data:
             starsem_cues = (data + cue_only_sents, labels + cue_only_cues)
             starsem_scopes = (scope_sents, scope_cues, data_scope)
             starsem_scopes_unique = [[], [], []]
-            for n, i in enumerate(starsem_scopes[0]):
+            """for n, i in enumerate(starsem_scopes[0]):
                 if i not in starsem_scopes[0][:n]:
                     starsem_scopes_unique[0].append(i)
                     starsem_scopes_unique[1].append(starsem_scopes[1][n])
                     starsem_scopes_unique[2].append(starsem_scopes[2][n])
-
-            return [starsem_cues, starsem_scopes_unique]
+                    if param.label_dim == 4:
+                        for p, e in enumerate(starsem_scopes[1][n]):
+                            if e == 0 or e == 1 or e == 2:
+                                starsem_scopes_unique[2][-1][p] = 2"""
+            if param.label_dim == 4:
+                for ci, c in enumerate(starsem_scopes[1]):
+                    for i, e in enumerate(c):
+                        if e == 0 or e == 1 or e == 2:
+                            starsem_scopes[2][ci][i] = 2
+            return [starsem_cues, starsem_scopes]
 
         def bioscope(f_path, cue_sents_only=False, frac_no_cue_sents=1.0):
             file = open(f_path, encoding='utf-8')
@@ -335,6 +343,11 @@ class Data:
                     frac_no_cue_sents * len(cue_only_data)))
             cue_only_sents = [i[0] for i in cue_only_samples]
             cue_only_cues = [i[1] for i in cue_only_samples]
+            if param.label_dim == 4:
+                for ci, c in enumerate(scope_cues):
+                    for i, e in enumerate(c):
+                        if e == 1:
+                            scope_scopes[ci][i] = 2
             return [(cue_sentence + cue_only_sents, cue_cues + \
                      cue_only_cues), (scope_sentence, scope_cues, scope_scopes)]
 
@@ -948,74 +961,76 @@ class Data:
 
             return torch.LongTensor(input_ids).to(device), torch.LongTensor(attention_masks).to(device), torch.LongTensor(mymasks).to(device)
 
-        b_input_ids, b_input_mask, b_mymasks = preprocess_cue_data(self, tokenizer)
-        logits = []
-        with torch.no_grad():
-            len_input = len(b_input_ids)
-            tmp_batch_len = len_input // 8
+        def predict_cues(obj, tokenizer):
+            b_input_ids, b_input_mask, b_mymasks = preprocess_cue_data(obj, tokenizer)
+            logits = []
+            with torch.no_grad():
+                len_input = len(b_input_ids)
+                tmp_batch_len = len_input // 8
 
-            for i in range(tmp_batch_len):
-                if i != tmp_batch_len - 1:
-                    logit = cue_model.model(
-                        b_input_ids[i*8: (i+1)*8],
-                        token_type_ids=None,
-                        attention_mask=b_input_mask[i*8: (i+1)*8])[0]
-                    active_loss = b_input_mask[i*8: (i+1)*8].view(-1) == 1
-                    # 5 is num_labels
-                    active_logit = logit.view(-1,
-                                                cue_model.num_labels)[active_loss]
-                    logits.append(logit)
-                else:
-                    logit = cue_model.model(
-                        b_input_ids[i*8:],
-                        token_type_ids=None,
-                        attention_mask=b_input_mask[i*8:])[0]
-                    active_loss = b_input_mask[i*8:].view(-1) == 1
-                    # 5 is num_labels
-                    active_logit = logit.view(-1,
-                                                cue_model.num_labels)[active_loss]
-                    logits.append(logit)
+                for i in range(tmp_batch_len):
+                    if i != tmp_batch_len - 1:
+                        logit = cue_model.model(
+                            b_input_ids[i*8: (i+1)*8],
+                            token_type_ids=None,
+                            attention_mask=b_input_mask[i*8: (i+1)*8])[0]
+                        active_loss = b_input_mask[i*8: (i+1)*8].view(-1) == 1
+                        # 5 is num_labels
+                        active_logit = logit.view(-1,
+                                                    cue_model.num_labels)[active_loss]
+                        logits.append(logit)
+                    else:
+                        logit = cue_model.model(
+                            b_input_ids[i*8:],
+                            token_type_ids=None,
+                            attention_mask=b_input_mask[i*8:])[0]
+                        active_loss = b_input_mask[i*8:].view(-1) == 1
+                        # 5 is num_labels
+                        active_logit = logit.view(-1,
+                                                    cue_model.num_labels)[active_loss]
+                        logits.append(logit)
 
-        logits = torch.cat(logits, dim = 0).cpu().numpy()
-        mymasks = b_mymasks.to('cpu').numpy()
+            logits = torch.cat(logits, dim = 0).cpu().numpy()
+            mymasks = b_mymasks.to('cpu').numpy()
 
-        logits = [list(p) for p in logits]
+            logits = [list(p) for p in logits]
 
-        actual_logits = []
+            actual_logits = []
 
-        for l, m in zip(logits, mymasks):
-            curr_preds = []
-            my_logits = []
-            in_split = 0
-            for i, j in zip(l, m):
-                if j == 1:
-                    if in_split == 1:
-                        if len(my_logits) > 0:
-                            curr_preds.append(my_logits[-1])
-                        mode_pred = np.argmax(np.average(
-                            np.array(curr_preds), axis=0), axis=0)
-                        if len(my_logits) > 0:
-                            my_logits[-1] = mode_pred
-                        else:
-                            my_logits.append(mode_pred)
-                        curr_preds = []
-                        in_split = 0
-                    my_logits.append(np.argmax(i))
-                if j == 0:
-                    curr_preds.append(i)
-                    in_split = 1
-            if in_split == 1:
-                if len(my_logits) > 0:
-                    curr_preds.append(my_logits[-1])
-                mode_pred = np.argmax(np.average(
-                    np.array(curr_preds), axis=0), axis=0)
-                if len(my_logits) > 0:
-                    my_logits[-1] = mode_pred
-                else:
-                    my_logits.append(mode_pred)
-            actual_logits.append(my_logits)
+            for l, m in zip(logits, mymasks):
+                curr_preds = []
+                my_logits = []
+                in_split = 0
+                for i, j in zip(l, m):
+                    if j == 1:
+                        if in_split == 1:
+                            if len(my_logits) > 0:
+                                curr_preds.append(my_logits[-1])
+                            mode_pred = np.argmax(np.average(
+                                np.array(curr_preds), axis=0), axis=0)
+                            if len(my_logits) > 0:
+                                my_logits[-1] = mode_pred
+                            else:
+                                my_logits.append(mode_pred)
+                            curr_preds = []
+                            in_split = 0
+                        my_logits.append(np.argmax(i))
+                    if j == 0:
+                        curr_preds.append(i)
+                        in_split = 1
+                if in_split == 1:
+                    if len(my_logits) > 0:
+                        curr_preds.append(my_logits[-1])
+                    mode_pred = np.argmax(np.average(
+                        np.array(curr_preds), axis=0), axis=0)
+                    if len(my_logits) > 0:
+                        my_logits[-1] = mode_pred
+                    else:
+                        my_logits.append(mode_pred)
+                actual_logits.append(my_logits)
 
-        #predictions.append(logits)
+            return actual_logits
+
 
         def preprocess_data(obj, tokenizer_obj, predicted_cue):
             dl_sents = obj.scope_data.sentences
@@ -1148,6 +1163,8 @@ class Data:
         val_inputs = [[] for i in range(len(other_datasets) + 1)]
         test_inputs = [[] for i in range(len(other_datasets) + 1)]
 
+
+        actual_logits = predict_cues(self, tokenizer)
         train_ret_val, val_ret_val, test_ret_val = preprocess_data(
             self, tokenizer, actual_logits)
         tr_inputs += train_ret_val[0]
@@ -1164,8 +1181,9 @@ class Data:
         test_inputs[0].append(test_ret_val[3])
 
         for idx, arg in enumerate(other_datasets, 1):
+            _logits = predict_cues(arg, tokenizer)
             train_ret_val, val_ret_val, test_ret_val = preprocess_data(
-                arg, tokenizer, None)
+                arg, tokenizer, _logits)
             tr_inputs += train_ret_val[0]
             tr_tags += train_ret_val[1]
             tr_masks += train_ret_val[2]
@@ -1552,7 +1570,7 @@ class PretrainedConfig(object):
 
     def __init__(self, **kwargs):
         self.finetuning_task = kwargs.pop('finetuning_task', None)
-        self.num_labels = kwargs.pop('num_labels', 2)
+        self.num_labels = kwargs.pop('num_labels', param.label_dim -1)
         self.output_attentions = kwargs.pop('output_attentions', False)
         self.output_hidden_states = kwargs.pop('output_hidden_states', False)
         self.output_past = kwargs.pop(
@@ -4311,7 +4329,7 @@ class ScopeModel:
             learning_rate=3e-5):
         self.model_name = SCOPE_MODEL
         self.task = TASK
-        self.num_labels = 2
+        self.num_labels = param.label_dim - 1
         if train:
             if 'xlnet' in SCOPE_MODEL:
                 self.model = XLNetForTokenClassification.from_pretrained(
@@ -4784,7 +4802,7 @@ class PipelineScopeModel:
             cue_model=None):
         self.model_name = SCOPE_MODEL
         self.task = TASK
-        self.num_labels = 2
+        self.num_labels = param.label_dim - 1
         if train:
             if 'xlnet' in SCOPE_MODEL:
                 self.model = XLNetForTokenClassification.from_pretrained(
@@ -5495,9 +5513,9 @@ for run_num in range(NUM_RUNS):
                 test_dataloaders['sherlock'] = test_dls[idx]
             idx += 1
         elif 'sherlock' in TEST_DATASETS:
-            sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_scope_dataloader_pipeline(
+            """sherlock_dl, _, _ = sherlock_test_gold_cardboard_data.get_scope_dataloader_pipeline(
                 test_size=0.00000001, val_size=0.00000001, other_datasets=[sherlock_test_gold_circle_data], cue_model=cue_model)
-            test_dataloaders['sherlock'] = sherlock_dl
+            test_dataloaders['sherlock'] = sherlock_dl"""
         
         del cue_model
         scope_model = PipelineScopeModel(
@@ -5516,6 +5534,13 @@ for run_num in range(NUM_RUNS):
             patience=PATIENCE,
             train_dl_name=','.join(TRAIN_DATASETS),
             val_dl_name=','.join(TRAIN_DATASETS))
+        
+        for k in test_dataloaders.keys():
+            print(f"Evaluate on {k}:")
+            if SUBTASK != 'pipeline':
+                model.evaluate(test_dataloaders[k], test_dl_name=k)
+            else:
+                scope_model.evaluate(test_dataloaders[k], test_dl_name=k)
     else:
         scope_model.train(
             train_dl,
@@ -5526,11 +5551,14 @@ for run_num in range(NUM_RUNS):
             val_dl_name=','.join(TRAIN_DATASETS))
 
 
-    for k in test_dataloaders.keys():
-        print(f"Evaluate on {k}:")
-        if SUBTASK != 'pipeline':
-            model.evaluate(test_dataloaders[k], test_dl_name=k)
-        else:
-            scope_model.evaluate(test_dataloaders[k], test_dl_name=k)
+        for k in test_dataloaders.keys():
+            print(f"Evaluate on {k}:")
+            if SUBTASK != 'pipeline':
+                model.evaluate(test_dataloaders[k], test_dl_name=k)
+            else:
+                scope_model.evaluate(test_dataloaders[k], test_dl_name=k)
+                
+        del scope_model
+
 
     print(f"\n\n************ RUN {run_num+1} DONE! **************\n\n")
