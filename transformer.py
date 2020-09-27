@@ -21,7 +21,7 @@ from transformers import AutoTokenizer, AutoModelWithLMHead
 from transformers import RobertaTokenizer, BertForTokenClassification, BertTokenizer, BertConfig, BertModel, WordpieceTokenizer, XLNetTokenizer
 from sklearn.metrics import f1_score, classification_report
 from sklearn.model_selection import train_test_split
-from keras.preprocessing.sequence import pad_sequences
+from util import pad_sequences
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.optim import Adam
 from torch.nn import CrossEntropyLoss, ReLU
@@ -47,7 +47,7 @@ SCOPE_MODEL = 'bert-base-cased'  # 'bert-base-cased'
 SCOPE_METHOD = 'augment'  # Options: augment, replace
 F1_METHOD = 'average'  # Options: average, first_token
 TASK = 'negation'  # Options: negation, speculation
-SUBTASK = 'pipeline'  # Options: cue_detection, scope_resolution, pipeline
+SUBTASK = 'scope_resolution'  # Options: cue_detection, scope_resolution, pipeline
 TRAIN_DATASETS = ['sherlock']
 TEST_DATASETS = ['sherlock']
 
