@@ -12,14 +12,14 @@ import _pickle
 from params import param
 
 class Cues:
-    def __init__(self, data):
+    def __init__(self, data: Union[List, Tuple]):
         self.sentences = data[0]
         self.cues = data[1]
         self.num_sentences = len(data[0])
 
 
 class Scopes:
-    def __init__(self, data):
+    def __init__(self, data: Union[List, Tuple]):
         self.sentences = data[0]
         self.cues = data[1]
         self.scopes = data[2]
@@ -43,7 +43,7 @@ class Data(object):
         dataset_name: The name of the dataset to be preprocessed. Values supported: sfu, bioscope, starsem.
         frac_no_cue_sents: The fraction of sentences to be included in the data object which have no negation/speculation cues.
         '''
-        def starsem(f_path, cue_sents_only=cue_sents_only, frac_no_cue_sents=1.0):
+        def starsem(f_path, cue_sents_only=False, frac_no_cue_sents=1.0):
             raw_data = open(f_path)
             sentence = []
             labels = []
@@ -59,6 +59,7 @@ class Data(object):
                 label = []
                 sentence = []
                 tokens = line.strip().split()
+                afsent = []
                 if len(tokens) == 8:  # This line has no cues
                     sentence.append(tokens[3])
                     label.append(3)  # Not a cue
@@ -72,80 +73,147 @@ class Data(object):
                     cue_only_data.append([sentence, label])
 
                 else:  # The line has 1 or more cues
-                    num_cues = (len(tokens)-7)//3
+                    num_cues = (len(tokens) - 7) // 3
+                    affix_num = -1
                     # cue_count+=num_cues
                     scope = [[] for i in range(num_cues)]
-                    # First list is the real labels, second list is to modify if it is a multi-word cue.
+                    # First list is the real labels, second list is to modify
+                    # if it is a multi-word cue.
                     label = [[], []]
                     # Generally not a cue, if it is will be set ahead.
                     label[0].append(3)
                     label[1].append(-1)  # Since not a cue, for now.
+                    aflabel = [[],[]]
+                    aflabel[0].append(3)
+                    aflabel[1].append(-1)
                     for i in range(num_cues):
-                        if tokens[7+3*i] != '_':  # Cue field is active
-                            if tokens[8+3*i] != '_':  # Check for affix
+                        if tokens[7 + 3 * i] != '_':  # Cue field is active
+                            if tokens[8 + 3 * i] != '_':  # Check for affix
                                 label[0][-1] = 0  # Affix
-                                affix_list.append(tokens[7+3*i]) # pylint:disable=undefined-variable
+                                #affix_list.append(tokens[7 + 3 * i]) # pylint: disable=undefined-variable
                                 label[1][-1] = i  # Cue number
+                                aflabel[0][-1] = 0
+                                aflabel[1][-1] = i
                                 # sentence.append(tokens[7+3*i])
                                 # new_word = '##'+tokens[8+3*i]
                             else:
-                                # Maybe a normal or multiword cue. The next few words will determine which.
+                                # Maybe a normal or multiword cue. The next few
+                                # words will determine which.
                                 label[0][-1] = 1
+                                aflabel[0][-1] = 1
                                 # Which cue field, for multiword cue altering.
                                 label[1][-1] = i
+                                aflabel[1][-1] = i
 
-                        if tokens[8+3*i] != '_':
+                        if tokens[8 + 3 * i] != '_':
                             scope[i].append(1)
                         else:
                             scope[i].append(2)
                     sentence.append(tokens[3])
+                    afsent.append(tokens[3])
                     for line in raw_data:
                         tokens = line.strip().split()
                         if len(tokens) == 0:
                             break
                         else:
-                            sentence.append(tokens[3])
+                            #sentence.append(tokens[3])
+                            token = tokens[3]
+                            affix_flag = False
                             # Generally not a cue, if it is will be set ahead.
                             label[0].append(3)
                             label[1].append(-1)  # Since not a cue, for now.
+                            aflabel[0].append(3)
+                            aflabel[1].append(-1)
                             for i in range(num_cues):
-                                if tokens[7+3*i] != '_':  # Cue field is active
-                                    if tokens[8+3*i] != '_':  # Check for affix
+                                if tokens[7 + 3 *
+                                          i] != '_':  # Cue field is active
+                                    if tokens[8 + 3 *
+                                              i] != '_':  # Check for affix
                                         label[0][-1] = 0  # Affix
+                                        aflabel[0][-1] = 0
+                                        aflabel[0].append(3)
                                         label[1][-1] = i  # Cue number
+                                        aflabel[1][-1] = i
+                                        aflabel[1].append(-1)
+                                        affix_flag = True
+                                        affix_num = i
+                                        token = [tokens[3], tokens[7 + 3 * i], tokens[8 + 3 * i]]
                                     else:
-                                        # Maybe a normal or multiword cue. The next few words will determine which.
+                                        # Maybe a normal or multiword cue. The
+                                        # next few words will determine which.
                                         label[0][-1] = 1
-                                        # Which cue field, for multiword cue altering.
+                                        aflabel[0][-1] = 1
+                                        # Which cue field, for multiword cue
+                                        # altering.
                                         label[1][-1] = i
-                                if tokens[8+3*i] != '_':
-                                    scope[i].append(1)
+                                        aflabel[1][-1] = i
+                                if tokens[8 + 3 * i] != '_':
+                                    # Detected scope
+                                    if tokens[7 + 3 * i] != '_' and i == affix_num:
+                                        # Check if it is affix cue
+                                        scope[i].append(1)
+                                        scope[i].append(2)
+                                    else:
+                                        scope[i].append(1)
                                 else:
                                     scope[i].append(2)
+                            if affix_flag is False:
+                                sentence.append(token)
+                                afsent.append(token)
+                            else:
+                                sentence.append(token[0])
+                                afsent.append(token[1])
+                                afsent.append(token[2])
                     for i in range(num_cues):
-                        indices = [index for index,
-                                   j in enumerate(label[1]) if i == j]
+                        indices = []
+                        for index, j in enumerate(label[1]):
+                            if i == j:
+                                indices.append(index)
                         count = len(indices)
                         if count > 1:
+                            # Multi word cue
                             for j in indices:
                                 label[0][j] = 2
                     for i in range(num_cues):
                         sc = []
-                        for a, b in zip(label[0], label[1]):
-                            if i == b:
-                                sc.append(a)
+ 
+                        if affix_num == -1:
+                            # No affix cue in this sent
+                            scope_sents.append(sentence)
+
+                            for a, b in zip(label[0], label[1]):
+                                if i == b:
+                                    sc.append(a)
+                                else:
+                                    sc.append(3)
+                        else:
+                            if affix_num == i:
+                                # Detect affix cue
+                                scope_sents.append(afsent)
+
+                                for a, b in zip(aflabel[0], aflabel[1]):
+                                    if i == b:
+                                        sc.append(a)
+                                    else:
+                                        sc.append(3)
                             else:
-                                sc.append(3)
-                        scope_cues.append(sc)
-                        scope_sents.append(sentence)
+                                scope_sents.append(sentence)
+
+                                for a, b in zip(label[0], label[1]):
+                                    if i == b:
+                                        sc.append(a)
+                                    else:
+                                        sc.append(3)
                         data_scope.append(scope[i])
+                        scope_cues.append(sc)
                     labels.append(label[0])
                     data.append(sentence)
             cue_only_samples = random.sample(
-                cue_only_data, k=int(frac_no_cue_sents*len(cue_only_data)))
+                cue_only_data, k=int(
+                    frac_no_cue_sents * len(cue_only_data)))
             cue_only_sents = [i[0] for i in cue_only_samples]
             cue_only_cues = [i[1] for i in cue_only_samples]
-            starsem_cues = (data+cue_only_sents, labels+cue_only_cues)
+            starsem_cues = (data + cue_only_sents, labels + cue_only_cues)
             starsem_scopes = (scope_sents, scope_cues, data_scope)
             starsem_scopes_unique = [[], [], []]
             """for n, i in enumerate(starsem_scopes[0]):
@@ -155,13 +223,13 @@ class Data(object):
                     starsem_scopes_unique[2].append(starsem_scopes[2][n])
                     if param.label_dim == 4:
                         for p, e in enumerate(starsem_scopes[1][n]):
-                            if e == 1 or e == 0:
-                                starsem_scopes_unique[2][-1][p] = 3"""
+                            if e == 0 or e == 1 or e == 2:
+                                starsem_scopes_unique[2][-1][p] = 2"""
             if param.label_dim == 4:
                 for ci, c in enumerate(starsem_scopes[1]):
                     for i, e in enumerate(c):
                         if e == 0 or e == 1 or e == 2:
-                            starsem_scopes[2][ci][i] = 3
+                            starsem_scopes[2][ci][i] = 2
             return [starsem_cues, starsem_scopes]
 
         def bioscope(f_path, cue_sents_only=cue_sents_only, frac_no_cue_sents=1.0):
@@ -409,8 +477,19 @@ class Data(object):
 
 class SplitData(object):
     def __init__(self, cue, scope):
-        self.cue_data = cue
-        self.scope_data = scope
+        if isinstance(cue, tuple):
+            self.cue_data = cue
+        if isinstance(scope, tuple):
+            self.scope_data = scope
+        if isinstance(cue, list):
+            combine_cue = cue[0].cues + cue[1].cues
+            combine_sent = cue[0].sentences + cue[1].sentences
+            self.cue_data = Cues([combine_sent, combine_cue])
+        if isinstance(scope, list):
+            combine_cue = scope[0].cues + scope[1].cues
+            combine_scope = scope[0].scopes + scope[1].scopes
+            combine_sent = scope[0].sentences + scope[1].sentences
+            self.scope_data = Scopes([combine_sent, combine_cue, combine_scope])
 
 class GetDataLoader(object):
     def __init__(self, data: Data, tokenizer, emb_type=param.lstm_emb_type, task='scope'):
