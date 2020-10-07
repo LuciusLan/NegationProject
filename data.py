@@ -1,15 +1,19 @@
 import os, re, torch, html, random
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
-from keras.preprocessing.sequence import pad_sequences
+from util import pad_sequences
 from sklearn.model_selection import train_test_split
 from transformers import BertTokenizer, AutoTokenizer
 from transformers.file_utils import cached_path
 import numpy as np
-from typing import List, Tuple, T, Iterable, Union
+from typing import List, Tuple, T, Iterable, Union, NewType
 import gensim
 import _pickle
 
 from params import param
+
+
+cue_id2label = {0: 'Affix', 1: 'Cue', 2: 'MCue', 3: 'O'}
+scope_id2label = {0: '<PAD>', 1: 'I', 2:'O', 3: 'C', 4: 'B', 5: 'E', 6: 'S'}
 
 class Cues:
     def __init__(self, data: Union[List, Tuple]):
@@ -30,30 +34,40 @@ class DataLoaderN(DataLoader):
         super().__init__(*args, **kwargs)
         self.tokenizer = tokenizer
 
-class Data(object):
+class RawData(object):
     """
     Wrapper of data. For sfu and bioscope data, splitting of train-dev-test will also be done here.
     class var:
-        cue_data: Union[Cue, List[Cue]]
-        scope_data: Union[Scope, List[Scope]]
+        raw (tuple[T]): raw data format. (cues, scopes, non_cue_sents)
     """
     def __init__(self, file, dataset_name='sfu', frac_no_cue_sents=1.0, test_size=0.15, val_size=0.15, cue_sents_only=False):
-        '''
+        """
         file: The path of the data file.
         dataset_name: The name of the dataset to be preprocessed. Values supported: sfu, bioscope, starsem.
         frac_no_cue_sents: The fraction of sentences to be included in the data object which have no negation/speculation cues.
-        '''
-        def starsem(f_path, cue_sents_only=False, frac_no_cue_sents=1.0):
+        >>>> self.raw: original labeled sentences
+        """
+        def starsem(f_path) -> Tuple[T]:
+            """
+                return: raw data format. (cues, scopes, non_cue_sents)
+                    cues (tuple[T]): (sentences, cue_labels)
+                    scopes (tuple[T]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
+                        where n = number of cues in this sentence.
+                        Note that for senteces[n], the length is different for sent corresponding to
+                        an affix cue.
+                    non_cue_sents: sentences that does not contain negation.
+            """
             raw_data = open(f_path)
             sentence = []
             labels = []
             label = []
             scope_sents = []
+            or_sents = []
             data_scope = []
             scope = []
             scope_cues = []
             data = []
-            cue_only_data = []
+            non_cue_data = []
 
             for line in raw_data:
                 label = []
@@ -70,7 +84,7 @@ class Data(object):
                         else:
                             sentence.append(tokens[3])
                             label.append(3)
-                    cue_only_data.append([sentence, label])
+                    non_cue_data.append([sentence, label])
 
                 else:  # The line has 1 or more cues
                     num_cues = (len(tokens) - 7) // 3
@@ -152,7 +166,7 @@ class Data(object):
                                     if tokens[7 + 3 * i] != '_' and i == affix_num:
                                         # Check if it is affix cue
                                         scope[i].append(1)
-                                        scope[i].append(2)
+                                        scope[i].append(1)
                                     else:
                                         scope[i].append(1)
                                 else:
@@ -163,7 +177,7 @@ class Data(object):
                             else:
                                 sentence.append(token[0])
                                 afsent.append(token[1])
-                                afsent.append(token[2])
+                                afsent.append(f'##{token[2]}')
                     for i in range(num_cues):
                         indices = []
                         for index, j in enumerate(label[1]):
@@ -174,12 +188,17 @@ class Data(object):
                             # Multi word cue
                             for j in indices:
                                 label[0][j] = 2
+                    
+                    sent_scopes = []
+                    sent_cues = []
+                    or_sents.append(sentence)
+                    scope_sent = []
                     for i in range(num_cues):
                         sc = []
  
                         if affix_num == -1:
                             # No affix cue in this sent
-                            scope_sents.append(sentence)
+                            scope_sent.append(sentence)
 
                             for a, b in zip(label[0], label[1]):
                                 if i == b:
@@ -189,7 +208,7 @@ class Data(object):
                         else:
                             if affix_num == i:
                                 # Detect affix cue
-                                scope_sents.append(afsent)
+                                scope_sent.append(afsent)
 
                                 for a, b in zip(aflabel[0], aflabel[1]):
                                     if i == b:
@@ -197,52 +216,51 @@ class Data(object):
                                     else:
                                         sc.append(3)
                             else:
-                                scope_sents.append(sentence)
+                                scope_sent.append(sentence)
 
                                 for a, b in zip(label[0], label[1]):
                                     if i == b:
                                         sc.append(a)
                                     else:
                                         sc.append(3)
-                        data_scope.append(scope[i])
-                        scope_cues.append(sc)
+                        sent_scopes.append(scope[i])
+                        sent_cues.append(sc)
+                    data_scope.append(sent_scopes)
+                    scope_cues.append(sent_cues)
+                    scope_sents.append(scope_sent)
                     labels.append(label[0])
                     data.append(sentence)
-            cue_only_samples = random.sample(
-                cue_only_data, k=int(
-                    frac_no_cue_sents * len(cue_only_data)))
-            cue_only_sents = [i[0] for i in cue_only_samples]
-            cue_only_cues = [i[1] for i in cue_only_samples]
-            starsem_cues = (data + cue_only_sents, labels + cue_only_cues)
-            starsem_scopes = (scope_sents, scope_cues, data_scope)
-            starsem_scopes_unique = [[], [], []]
-            """for n, i in enumerate(starsem_scopes[0]):
-                if i not in starsem_scopes[0][:n]:
-                    starsem_scopes_unique[0].append(i)
-                    starsem_scopes_unique[1].append(starsem_scopes[1][n])
-                    starsem_scopes_unique[2].append(starsem_scopes[2][n])
-                    if param.label_dim == 4:
-                        for p, e in enumerate(starsem_scopes[1][n]):
-                            if e == 0 or e == 1 or e == 2:
-                                starsem_scopes_unique[2][-1][p] = 2"""
+            non_cue_sents = [i[0] for i in non_cue_data]
+            non_cue_cues = [i[1] for i in non_cue_data]
+            starsem_cues = (data + non_cue_sents, labels + non_cue_cues)
+            starsem_scopes = (or_sents, scope_sents, scope_cues, data_scope)
             if param.label_dim == 4:
-                for ci, c in enumerate(starsem_scopes[1]):
-                    for i, e in enumerate(c):
-                        if e == 0 or e == 1 or e == 2:
-                            starsem_scopes[2][ci][i] = 2
-            return [starsem_cues, starsem_scopes]
+                for si, sent_cues in enumerate(starsem_scopes[2]):
+                    for ci, cues in enumerate(sent_cues):
+                        for i, e in enumerate(cues):
+                            if e == 0 or e == 1 or e == 2:
+                                starsem_scopes[3][si][ci][i] = 3
+            return [starsem_cues, starsem_scopes, non_cue_sents]
 
-        def bioscope(f_path, cue_sents_only=cue_sents_only, frac_no_cue_sents=1.0):
+        def bioscope(f_path):
+            """
+                return: raw data format. (cues, scopes, non_cue_sents)
+                    cues (tuple[T]): (sentences, cue_labels)
+                    scopes (tuple[T]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
+                        where n = number of cues in this sentence.
+                    non_cue_sents: sentences that does not contain negation.
+            """
             file = open(f_path, encoding='utf-8')
             sentences = []
             for s in file:
                 sentences += re.split("(<.*?>)", html.unescape(s))
             cue_sentence = []
             cue_cues = []
-            cue_only_data = []
+            non_cue_data = []
             scope_cues = []
             scope_scopes = []
-            scope_sentence = []
+            scope_sentences = []
+            scope_orsents = []
             sentence = []
             cue = {}
             scope = {}
@@ -276,25 +294,33 @@ class Data(object):
                 elif '</sentence' in token:
                     #print(cue, scope)
                     if len(cue.keys()) == 0:
-                        cue_only_data.append([sentence, [3]*len(sentence)])
+                        # no cue in this sent
+                        non_cue_data.append([sentence, [3]*len(sentence)])
                     else:
                         cue_sentence.append(sentence)
                         cue_cues.append([3]*len(sentence))
+                        scope_sentence = []
+                        scope_subscope = []
+                        scope_subcues = []
                         for i in cue.keys():
                             scope_sentence.append(sentence)
-                            scope_cues.append([3]*len(sentence))
+                            scope_subcues.append([3]*len(sentence))
                             if len(cue[i]) == 1:
                                 cue_cues[-1][cue[i][0]] = 1
-                                scope_cues[-1][cue[i][0]] = 1
+                                scope_subcues[-1][cue[i][0]] = 1
                             else:
                                 for c in cue[i]:
                                     cue_cues[-1][c] = 2
-                                    scope_cues[-1][c] = 2
-                            scope_scopes.append([2]*len(sentence))
+                                    scope_subcues[-1][c] = 2
+                            scope_subscope.append([2]*len(sentence))
 
                             if i in scope.keys():
                                 for s in scope[i]:
-                                    scope_scopes[-1][s] = 1
+                                    scope_subscope[-1][s] = 1
+                        scope_orsents.append(sentence)
+                        scope_sentences.append(scope_sentence)
+                        scope_cues.append(scope_subcues)
+                        scope_scopes.append(scope_subscope)
 
                     sentence = []
                     cue = {}
@@ -318,18 +344,25 @@ class Data(object):
                                 scope[i] += [word_num +
                                              i for i in range(len(words))]
                         word_num += len(words)
-            cue_only_samples = random.sample(
-                cue_only_data, k=int(frac_no_cue_sents*len(cue_only_data)))
-            cue_only_sents = [i[0] for i in cue_only_samples]
-            cue_only_cues = [i[1] for i in cue_only_samples]
+            non_cue_sents = [i[0] for i in non_cue_data]
+            non_cue_cues = [i[1] for i in non_cue_data]
             if param.label_dim == 4:
                 for ci, c in enumerate(scope_cues):
                     for i, e in enumerate(c):
                         if e == 0 or e == 1 or e == 2:
                             scope_scopes[ci][i] = 3
-            return [(cue_sentence+cue_only_sents, cue_cues+cue_only_cues), (scope_sentence, scope_cues, scope_scopes)]
+            return [(cue_sentence+non_cue_sents, cue_cues+non_cue_cues), 
+                    (scope_orsents, scope_sentences, scope_cues, scope_scopes),
+                    non_cue_sents]
 
         def sfu_review(f_path, cue_sents_only=cue_sents_only, frac_no_cue_sents=1.0):
+            """
+                return: raw data format. (cues, scopes, non_cue_sents)
+                    cues (tuple[T]): (sentences, cue_labels)
+                    scopes (tuple[T]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
+                        where n = number of cues in this sentence.
+                    non_cue_sents: sentences that does not contain negation.
+            """
             file = open(f_path, encoding='utf-8')
             sentences = []
             for s in file:
@@ -339,6 +372,8 @@ class Data(object):
             scope_cues = []
             scope_scopes = []
             scope_sentence = []
+            scope_sentences = []
+            scope_orsents = []
             sentence = []
             cue = {}
             scope = {}
@@ -346,7 +381,7 @@ class Data(object):
             in_cue = []
             word_num = 0
             c_idx = []
-            cue_only_data = []
+            non_cue_data = []
             s_idx = []
             in_word = 0
             for token in sentences:
@@ -379,24 +414,31 @@ class Data(object):
                         scope[i] = []
                 elif '</SENTENCE' in token:
                     if len(cue.keys()) == 0:
-                        cue_only_data.append([sentence, [3]*len(sentence)])
+                        non_cue_data.append([sentence, [3]*len(sentence)])
                     else:
                         cue_sentence.append(sentence)
                         cue_cues.append([3]*len(sentence))
+                        scope_sentence = []
+                        scope_subscope = []
+                        scope_subcues = []
                         for i in cue.keys():
                             scope_sentence.append(sentence)
-                            scope_cues.append([3]*len(sentence))
+                            scope_subcues.append([3]*len(sentence))
                             if len(cue[i]) == 1:
                                 cue_cues[-1][cue[i][0]] = 1
-                                scope_cues[-1][cue[i][0]] = 1
+                                scope_subcues[-1][cue[i][0]] = 1
                             else:
                                 for c in cue[i]:
                                     cue_cues[-1][c] = 2
-                                    scope_cues[-1][c] = 2
-                            scope_scopes.append([2]*len(sentence))
+                                    scope_subcues[-1][c] = 2
+                            scope_subscope.append([2]*len(sentence))
                             if i in scope.keys():
                                 for s in scope[i]:
-                                    scope_scopes[-1][s] = 1
+                                    scope_subscope[-1][s] = 1
+                        scope_orsents.append(sentence)
+                        scope_sentences.append(scope_sentence)
+                        scope_cues.append(scope_subcues)
+                        scope_scopes.append(scope_subscope)
                     sentence = []
                     cue = {}
                     scope = {}
@@ -416,40 +458,22 @@ class Data(object):
                                 for j in i:
                                     scope[j].append(word_num)
                         sentence.append(token)
-            cue_only_samples = random.sample(
-                cue_only_data, k=int(frac_no_cue_sents*len(cue_only_data)))
-            cue_only_sents = [i[0] for i in cue_only_samples]
-            cue_only_cues = [i[1] for i in cue_only_samples]
+            non_cue_sents = [i[0] for i in non_cue_data]
+            non_cue_cues = [i[1] for i in non_cue_data]
             if param.label_dim == 4:
                 for ci, c in enumerate(scope_cues):
                     for i, e in enumerate(c):
                         if e == 0 or e == 1 or e == 2:
                             scope_scopes[ci][i] = 3
 
-            return [(cue_sentence+cue_only_sents, cue_cues+cue_only_cues), (scope_sentence, scope_cues, scope_scopes)]
-
-        def split_(input_: Iterable ,random_state: int, random_state_2: int):
-            tr, te = train_test_split(
-                input_, test_size=test_size, random_state=random_state)
-            tra, val = train_test_split(
-                tr, test_size=(val_size / (1 - test_size)), random_state=random_state_2)
-            return tra, te, val
+            return [(cue_sentence+non_cue_sents, cue_cues+non_cue_cues), (scope_orsents, scope_sentences, scope_cues, scope_scopes), non_cue_sents]
 
         if dataset_name == 'bioscope':
-            ret_val = bioscope(file, frac_no_cue_sents=frac_no_cue_sents)
-            random_state = np.random.randint(1, 2020)
-            random_state_2 = np.random.randint(1, 2020)
-            tra_cue_sents, te_cue_sents, dev_cue_sents = split_(ret_val[0][0], random_state, random_state_2)
-            tra_cue, te_cue, dev_cue = split_(ret_val[0][1], random_state, random_state_2)
-            tra_scope_sents, te_scope_sents, dev_scope_sents = split_(ret_val[1][0], random_state, random_state_2)
-            tra_scope_cue, te_scope_cue, dev_scope_cue = split_(ret_val[1][1], random_state, random_state_2)
-            tra_scope, te_scope, dev_scope = split_(ret_val[1][2], random_state, random_state_2)
-            self.cue_data = (Cues([tra_cue_sents, tra_cue]), Cues([te_cue_sents, te_cue]), Cues([dev_cue_sents, dev_cue]))
-            self.scope_data = (Scopes([tra_scope_sents, tra_scope_cue, tra_scope]), Scopes([te_scope_sents, te_scope_cue, te_scope]), Scopes([dev_scope_sents, dev_scope_cue, dev_scope]))
-
+            self.raw = bioscope(file)
         elif dataset_name == 'sfu':
             sfu_cues = [[], []]
-            sfu_scopes = [[], [], []]
+            sfu_scopes = [[], [], [], []]
+            sfu_noncue_sents = []
             for dir_name in os.listdir(file):
                 if '.' not in dir_name:
                     for f_name in os.listdir(file+"//"+dir_name):
@@ -458,22 +482,57 @@ class Data(object):
                         sfu_cues = [a+b for a, b in zip(sfu_cues, r_val[0])]
                         sfu_scopes = [a+b for a,
                                       b in zip(sfu_scopes, r_val[1])]
-            random_state = np.random.randint(1, 2020)
-            random_state_2 = np.random.randint(1, 2020)
-            tra_cue_sents, te_cue_sents, dev_cue_sents = split_(sfu_cues[0], random_state, random_state_2)
-            tra_cue, te_cue, dev_cue = split_(sfu_cues[1], random_state, random_state_2)
-            tra_scope_sents, te_scope_sents, dev_scope_sents = split_(sfu_scopes[0], random_state, random_state_2)
-            tra_scope_cue, te_scope_cue, dev_scope_cue = split_(sfu_scopes[1], random_state, random_state_2)
-            tra_scope, te_scope, dev_scope = split_(sfu_scopes[2], random_state, random_state_2)
-            self.cue_data = (Cues([tra_cue_sents, tra_cue]), Cues([te_cue_sents, te_cue]), Cues([dev_cue_sents, dev_cue]))
-            self.scope_data = (Scopes([tra_scope_sents, tra_scope_cue, tra_scope]), Scopes([te_scope_sents, te_scope_cue, te_scope]), Scopes([dev_scope_sents, dev_scope_cue, dev_scope]))
+                        sfu_noncue_sents = [a+b for a, b in zip(sfu_noncue_sents, r_val[2])]
+            self.raw = (sfu_cues, sfu_scopes, sfu_noncue_sents)
         elif dataset_name == 'starsem':
-            ret_val = starsem(file, frac_no_cue_sents=frac_no_cue_sents)
-            self.cue_data = Cues(ret_val[0])
-            self.scope_data = Scopes(ret_val[1])
+            self.raw = starsem(file)  
         else:
             raise ValueError(
                 "Supported Dataset types are:\n\tbioscope\n\tsfu\n\tconll_cue")
+
+class InputExample(object):
+    def __init__(self, guid, sent, subword_mask=None):
+        self.guid = guid
+        self.sent = sent
+        self.subword_mask = subword_mask
+
+class CueExample(InputExample):
+    def __init__(self, cues, **kwargs):
+        super().__init__(**kwargs)
+        self.cues = cues
+
+class ScopeExample(InputExample):
+    def __init__(self, cues, scopes, sc_sent, **kwargs):
+        super().__init__(**kwargs)
+        self.num_cues = len(scopes)
+        self.cues = cues
+        self.scopes = scopes
+        self.sc_sent = sc_sent
+
+ExampleLike = Union[CueExample, ScopeExample, InputExample]
+
+class CueFeature(object):
+    def __init__(self, guid, sent, input_ids, padding_mask, subword_mask, input_len, cues):
+        self.guid = guid
+        self.sent = sent
+        self.input_ids = input_ids
+        self.padding_mask = padding_mask
+        self.subword_mask = subword_mask
+        self.input_len = input_len
+        self.cues = cues
+
+class ScopeFeature(object):
+    def __init__(self, guid, sent, input_ids, padding_mask, subword_mask, input_len, cues, scopes):
+        self.guid = guid
+        self.sent = sent
+        self.input_ids = input_ids
+        self.padding_mask = padding_mask
+        self.subword_mask = subword_mask
+        self.input_len = input_len
+        self.cues = cues
+        self.scopes = scopes
+
+
 
 class SplitData(object):
     def __init__(self, cue, scope):
@@ -491,6 +550,237 @@ class SplitData(object):
             combine_sent = scope[0].sentences + scope[1].sentences
             self.scope_data = Scopes([combine_sent, combine_cue, combine_scope])
 
+class Processor(object):
+    def __init__(self):
+        self.tokenizer = None
+
+    @classmethod
+    def read_data(cls, input_file, dataset_name=None) -> RawData:
+        return RawData(input_file, dataset_name=dataset_name)
+
+    def create_examples(self, data: RawData, example_type: str, cue_or_scope: str, cached_file=None,
+                        test_size=0.15, val_size=0.15) -> Union[ExampleLike, Tuple[ExampleLike]]:
+        """
+        Create packed example format for input data. Do train-test split if specified.
+
+            prams:
+                data (RawData): Though it's not "raw". Already contains tag information
+                example_type (str): "train", "test", "dev", "split". If set as split, 
+                    will perform train-test split as well. 
+                cue_or_scope (str): cue or scope.
+                cached_file (NoneType | str): if specified, save the packed examples to cache file.
+
+        """
+        assert example_type.lower() in [
+            'train', 'test', 'dev', 'split'], 'Wrong example type.'
+        assert cue_or_scope in ['cue', 'scope'], 'Must specify cue of scope'
+        if cue_or_scope == 'cue':
+            lines = data.raw[0]
+            examples = []
+            for i, _ in enumerate(lines[0]):
+                guid = '%s-%d' % (example_type, i)
+                sentence = lines[0][i]
+                cues = lines[1][i]
+                sent = ' '.join(sentence)
+                examples.append(CueExample(guid=guid, sent=sent, cues=cues, subword_mask=None))
+        elif cue_or_scope == 'scope':
+            lines = data.raw[1]
+            examples = []
+            for i, _ in enumerate(lines[0]):
+                guid = '%s-%d' % (example_type, i)
+                or_sent = lines[0][i]
+                sentence = lines[1][i]
+                cues = lines[2][i]
+                sent = ' '.join(or_sent)
+                scopes = lines[3][i]
+                examples.append(ScopeExample(guid=guid, sent=sent, cues=cues, scopes=scopes, sc_sent=sentence, subword_mask=None))
+
+        if example_type.lower() in ('train', 'test', 'dev'):
+            if cached_file is not None:
+                print('Saving examples into cached file %s', cached_file)
+                torch.save(examples, cached_file)
+            return examples
+        elif example_type.lower() == 'split':
+            random_state = np.random.randint(1, 2020)
+            tr_, te = train_test_split(examples, test_size=test_size, random_state=random_state)
+            random_state2 = np.random.randint(1, 2020)
+            tr, dev = train_test_split(tr_, test_size=(
+                val_size / (1 - test_size)), random_state=random_state2)
+            for i, e in enumerate(tr):
+                e.guid = f'train-{i}'
+            for i, e in enumerate(te):
+                e.guid = f'test-{i}'
+            for i, e in enumerate(dev):
+                e.guid = f'dev-{i}'
+            if cached_file is not None:
+                print('Saving examples into cached file %s', cached_file)
+                torch.save(tr, f'train_{cached_file}')
+                torch.save(te, f'test_{cached_file}')
+                torch.save(dev, f'dev_{cached_file}')
+            return tr, te, dev
+    
+    def create_features(self, data: List[ExampleLike], cue_or_scope: str,
+                        max_seq_len: int, is_bert=False, cached_file=None) -> List[Union[CueFeature, ScopeFeature]]:
+        assert self.tokenizer is not None, 'Execute self.get_tokenizer() first to get the corresponding tokenizer.'
+        features = []
+        if cue_or_scope == 'cue':
+            for example in data:
+                sent = example.sent
+                guid = example.guid
+                if is_bert:
+                    # For BERT model
+                    new_text = []
+                    new_cues = []
+                    subword_mask = []
+                    for word, cue in zip(sent, example.cues):
+                        subwords = self.tokenizer.tokenize(word)
+                        for i, subword in enumerate(subwords):
+                            mask = 1
+                            if i > 0:
+                                mask = 0
+                            subword_mask.append(mask)
+                            new_cues.append(cue)
+                            new_text.append(subword)
+                    if len(new_text) >= max_seq_len - 1:
+                        new_text = new_text[0:(max_seq_len - 2)]
+                        new_cues = new_cues[0:(max_seq_len - 2)]
+                        subword_mask = subword_mask[0:(max_seq_len - 2)]
+                    new_text.insert(0, '[CLS]')
+                    new_text.append('[SEP]')
+                    subword_mask.insert(0, 1)
+                    subword_mask.append(1)
+                    new_cues.insert(0, 3)
+                    new_cues.append(3)
+                    input_ids = self.tokenizer.convert_tokens_to_ids(new_text)
+                    padding_mask = [1] * len(input_ids)
+                    input_len = len(input_ids)
+                    while len(input_ids) < max_seq_len:
+                        input_ids.append(0)
+                        padding_mask.append(0)
+                        subword_mask.append(0)
+                        new_cues.append(3)
+                    feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids, 
+                                         padding_mask=padding_mask, subword_mask=subword_mask,
+                                         input_len=input_len, cues=new_cues)
+                else:
+                    # For non-BERT (non-BPE tokenization)
+                    cues = example.cues
+                    cues.insert(0, 3)
+                    cues.append(3)
+                    words = self.tokenizer.tokenize(sent)
+                    words.insert(0, '[CLS]')
+                    words.append('[SEP]')
+                    input_ids = self.tokenizer.convert_tokens_to_ids(words)
+                    padding_mask = [1] * len(input_ids)
+                    input_len = len(input_ids)
+                    while len(input_ids) < max_seq_len:
+                        input_ids.append(0)
+                        padding_mask.append(0)
+                        cues.append(3)
+                    feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids, 
+                                         padding_mask=padding_mask, subword_mask=None,
+                                         input_len=input_len, cues=cues)
+                features.append(feature)
+        else:
+            # For scope
+            for example in data:
+                guid = example.guid
+                wrap_input_id = []
+                wrap_subword_mask = []
+                wrap_cues = []
+                wrap_scopes = []
+                wrap_padding_mask = []
+                wrap_input_len = []
+
+                for c in range(example.num_cues):
+                    sent = example.sc_sent[c]
+                    cues = example.cues[c]
+                    scopes = example.scopes[c]
+                    if is_bert:
+                        # For BERT model
+                        new_text = []
+                        new_cues = []
+                        new_scopes = []
+                        subword_mask = []
+                        for word, cue, scope in zip(sent, cues, scopes):
+                            subwords = self.tokenizer.tokenize(word)
+                            for i, subword in enumerate(subwords):
+                                mask = 1
+                                if i > 0:
+                                    mask = 0
+                                subword_mask.append(mask)
+                                new_cues.append(cue)
+                                new_scopes.append(scope)
+                                new_text.append(subword)
+                        if len(new_text) >= max_seq_len - 1:
+                            new_text = new_text[0:(max_seq_len - 2)]
+                            new_cues = new_cues[0:(max_seq_len - 2)]
+                            subword_mask = subword_mask[0:(max_seq_len - 2)]
+                        new_text.insert(0, '[CLS]')
+                        new_text.append('[SEP]')
+                        subword_mask.insert(0, 1)
+                        subword_mask.append(1)
+                        new_cues.insert(0, 3)
+                        new_cues.append(3)
+                        new_scopes.insert(0, 2)
+                        new_scopes.append(2)
+                        input_ids = self.tokenizer.convert_tokens_to_ids(new_text)
+                        padding_mask = [1] * len(input_ids)
+                        input_len = len(input_ids)
+                        while len(input_ids) < max_seq_len:
+                            input_ids.append(0)
+                            padding_mask.append(0)
+                            subword_mask.append(0)
+                            new_cues.append(3)
+                            new_scopes.append(0)
+                        wrap_input_id.append(input_ids)
+                        wrap_subword_mask.append(subword_mask)
+                        wrap_cues.append(new_cues)
+                        wrap_scopes.append(new_scopes)
+                        wrap_padding_mask.append(padding_mask)
+                        wrap_input_len.append(input_len)
+                    else:
+                        # For non-BERT (non-BPE tokenization)
+                        sent = example.sc_sent[c]
+                        cues = example.cues[c]
+                        scopes = example.scopes[c]
+                        cues.insert(0, 3)
+                        cues.append(3)
+                        scopes.insert(0, 2)
+                        scopes.append(2)
+                        words = self.tokenizer.tokenize(sent)
+                        words.insert(0, '[CLS]')
+                        words.append('[SEP]')
+                        input_ids = self.tokenizer.convert_tokens_to_ids(words)
+                        padding_mask = [1] * len(input_ids)
+                        input_len = len(input_ids)
+                        while len(input_ids) < max_seq_len:
+                            input_ids.append(0)
+                            padding_mask.append(0)
+                            cues.append(3)
+                        wrap_input_id.append(input_ids)
+                        wrap_subword_mask = None
+                        wrap_cues.append(cues)
+                        wrap_scopes.append(scopes)
+                        wrap_padding_mask.append(padding_mask)
+                        wrap_input_len.append(input_len)
+                    
+                    feature = ScopeFeature(guid=guid, sent=example.sent, input_ids=wrap_input_id, 
+                                           padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
+                                           input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes)
+                features.append(feature)
+        return features
+            
+
+    def get_tokenizer(self, data: Tuple[InputExample], is_bert=False, do_lower_case=False, bert_path=None):
+        if is_bert:
+            self.tokenizer = BertTokenizer.from_pretrained(
+                bert_path, do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
+        else:
+            self.tokenizer = OtherTokenizer(data, external_vocab=False)
+
+
+'''
 class GetDataLoader(object):
     def __init__(self, data: Data, tokenizer, emb_type=param.lstm_emb_type, task='scope'):
         """
@@ -515,13 +805,13 @@ class GetDataLoader(object):
             val_size=0.15,
             test_size=0.15,
             other_datasets=[]) -> Tuple[DataLoader]:
-        '''
+        """
         This function returns the dataloader for the cue detection.
         val_size: The size of the validation dataset (Fraction between 0 to 1)
         test_size: The size of the test dataset (Fraction between 0 to 1)
         other_datasets: Other datasets to use to get one combined train dataloader
         Returns: train_dataloader, list of validation dataloaders, list of test dataloaders
-        '''
+        """
         do_lower_case = False
         tokenizer = BertTokenizer.from_pretrained(
                 'bert-base-cased', do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
@@ -677,13 +967,13 @@ class GetDataLoader(object):
             val_size=0.15,
             test_size=0.15,
             other_datasets=[]) -> Tuple[T]:
-        '''
+        """
         This function returns the dataloader for the cue detection.
         val_size: The size of the validation dataset (Fraction between 0 to 1)
         test_size: The size of the test dataset (Fraction between 0 to 1)
         other_datasets: Other datasets to use to get one combined train dataloader
         Returns: train_dataloader, list of validation dataloaders, list of test dataloaders
-        '''
+        """
         method = param.scope_method
         do_lower_case = False
         tokenizer = BertTokenizer.from_pretrained(
@@ -915,6 +1205,7 @@ class GetDataLoader(object):
         sampler = RandomSampler(dataset)
         dataloader = DataLoaderN(dataset=dataset, batch_size=param.batch_size, sampler=sampler, tokenizer=self.tokenizer)
         return dataloader
+'''
 
 class Dictionary(object):
     def __init__(self):
@@ -931,14 +1222,16 @@ class Dictionary(object):
         return len(self.id2token)
 
 class NaiveTokenizer(object):
-    def __init__(self, data: Data):
+    def __init__(self, data: Tuple[InputExample]):
         self.dictionary = Dictionary()
         self.data = data
         self.dictionary.add_word('<PAD>')
-        for sent in self.data.scope_data.sentences:
-            for word in sent:
+        for s in self.data:
+            for word in s.sent:
                 self.dictionary.add_word(word)
         self.dictionary.add_word('<OOV>')
+        self.dictionary.add_word('[CLS]')
+        self.dictionary.add_word('[SEP]')
         
         
     def tokenize(self, text: str):
@@ -965,7 +1258,7 @@ class NaiveTokenizer(object):
         return " ".join(token_list)
 
 class OtherTokenizer(NaiveTokenizer):
-    def __init__(self, data: Data, emb=param.embedding, external_vocab=True):
+    def __init__(self, data, emb=param.embedding, external_vocab=True):
         super(OtherTokenizer, self).__init__(data)
         if external_vocab is True:
             with open('reduced_fasttext_vocab.bin', 'rb') as f:
@@ -980,3 +1273,12 @@ class OtherTokenizer(NaiveTokenizer):
                 self.embedding[self.dictionary.token2id[w]] = self.vector[w]
             elif w.lower() in self.vector:
                 self.embedding[self.dictionary.token2id[w]] = self.vector[w.lower()]
+
+if __name__ == "__main__":
+    proc = Processor()
+    data = proc.read_data(param.data_path['bioscope_abstracts'], dataset_name='bioscope')
+    examples = proc.create_examples(data=data,
+                    example_type='train',
+                    cached_file=None,
+                    cue_or_scope='scope')
+    print()
