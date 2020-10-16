@@ -19,7 +19,7 @@ class RawData():
         non_cue_sents (tuple[T]): sentences that does not contain negation.
     For detail refer to the local methods for each dataset in constructor
     """
-    def __init__(self, file, dataset_name='sfu', frac_no_cue_sents=1.0, test_size=0.15, val_size=0.15, cue_sents_only=False):
+    def __init__(self, file, dataset_name='sfu'):
         """
         params:
             file: The path of the data file.
@@ -27,7 +27,7 @@ class RawData():
             frac_no_cue_sents: The fraction of sentences to be included in the data object which have no negation/speculation cues.
         """
         if dataset_name == 'bioscope':
-            self.cues, self.scopes, self.non_cue_sents = self.bioscope(file)
+            self.cues, self.scopes, self.non_cue_sents = bioscope(file)
         elif dataset_name == 'sfu':
             sfu_cues = [[], [], [], []]
             sfu_scopes = [[], [], [], []]
@@ -35,180 +35,198 @@ class RawData():
             for dir_name in os.listdir(file):
                 if '.' not in dir_name:
                     for f_name in os.listdir(file+"//"+dir_name):
-                        r_val = self.sfu_review(
-                            file+"//"+dir_name+'//'+f_name, frac_no_cue_sents=frac_no_cue_sents)
+                        r_val = sfu_review(
+                            file+"//"+dir_name+'//'+f_name)
                         sfu_cues = [a+b for a, b in zip(sfu_cues, r_val[0])]
                         sfu_scopes = [a+b for a,
                                       b in zip(sfu_scopes, r_val[1])]
-                        sfu_noncue_sents = [a+b for a, b in zip(sfu_noncue_sents, r_val[2])]
+                        sfu_noncue_sents.extend(r_val[2])
             self.cues = sfu_cues
             self.scopes = sfu_scopes
             self.non_cue_sents = sfu_noncue_sents
         elif dataset_name == 'sherlock':
-            self.cues, self.scopes, self.non_cue_sents = self.sherlock(file)  
+            self.cues, self.scopes, self.non_cue_sents = sherlock(file)  
         else:
             raise ValueError(
                 "Supported Dataset types are:\n\tbioscope\n\tsfu\n\tconll_cue")
 
-    def sherlock(self, f_path) -> Tuple[List, List, List]:
-        """
-            return: raw data format. (cues, scopes, non_cue_sents)
-                cues (list[list[T]]): (sentences, cue_labels, cue_sep, num_cues)
-                    cue_sep is the seperation label of cues. 
-                    num_cues notes the number of cues in this sent.
-                scopes (list[list[T]]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
-                    where n = number of cues in this sentence.
-                    Note that for senteces[n], the length is different for sent corresponding to
-                    an affix cue.
-                non_cue_sents (list[T]): sentences that does not contain negation.
-        """
-        raw_data = open(f_path)
-        sentence = []
-        labels = []
+def sherlock(f_path) -> Tuple[List, List, List]:
+    """
+    return: raw data format. (cues, scopes, non_cue_sents)
+        cues (list[list[T]]): (sentences, cue_labels, cue_sep, num_cues)
+            cue_sep is the seperation label of cues. 
+            num_cues notes the number of cues in this sent.
+        scopes (list[list[T]]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
+            where n = number of cues in this sentence.
+            Note that for senteces[n], the length is different for sent corresponding to
+            an affix cue.
+        non_cue_sents (list[T]): sentences that does not contain negation.
+    """
+    raw_data = open(f_path)
+    sentence = []
+    labels = []
+    label = []
+    scope_sents = []
+    or_sents = []
+    data_scope = []
+    scope = []
+    scope_cues = []
+    data = []
+    non_cue_data = []
+    num_cue_list = []
+    cue_sep = []
+
+    for line in raw_data:
         label = []
-        scope_sents = []
-        or_sents = []
-        data_scope = []
-        scope = []
-        scope_cues = []
-        data = []
-        non_cue_data = []
-        num_cue = []
-        cue_sep = []
+        sentence = []
+        tokens = line.strip().split()
+        afsent = []
+        noncue_sep = []
+        if len(tokens) == 8:  # This line has no cues
+            num_cues = 0
+            sentence.append(tokens[3])
+            label.append(3)  # Not a cue
+            noncue_sep.append(0)
+            for line in raw_data:
+                tokens = line.strip().split()
+                if len(tokens) == 0:
+                    break
+                else:
+                    sentence.append(tokens[3])
+                    label.append(3)
+                    noncue_sep.append(0)
+            non_cue_data.append([sentence, label, noncue_sep])
 
-        for line in raw_data:
-            label = []
-            sentence = []
-            tokens = line.strip().split()
-            afsent = []
-            noncue_sep = []
-            if len(tokens) == 8:  # This line has no cues
-                num_cues = 0
-                sentence.append(tokens[3])
-                label.append(3)  # Not a cue
-                noncue_sep.append(0)
-                for line in raw_data:
-                    tokens = line.strip().split()
-                    if len(tokens) == 0:
-                        break
+        else:  # The line has 1 or more cues
+            num_cues = (len(tokens) - 7) // 3
+            affix_num = -1
+            # cue_count+=num_cues
+            scope = [[] for i in range(num_cues)]
+            # First list is the real labels, second list is to modify
+            # if it is a multi-word cue.
+            label = [[], []]
+            # Generally not a cue, if it is will be set ahead.
+            label[0].append(3)
+            label[1].append(-1)  # Since not a cue, for now.
+            aflabel = [[],[]]
+            aflabel[0].append(3)
+            aflabel[1].append(-1)
+            for i in range(num_cues):
+                if tokens[7 + 3 * i] != '_':  # Cue field is active
+                    if tokens[8 + 3 * i] != '_':  # Check for affix
+                        label[0][-1] = 0  # Affix
+                        #affix_list.append(tokens[7 + 3 * i]) # pylint: disable=undefined-variable
+                        label[1][-1] = i  # Cue number
+                        aflabel[0][-1] = 0
+                        aflabel[1][-1] = i
+                        # sentence.append(tokens[7+3*i])
+                        # new_word = '##'+tokens[8+3*i]
                     else:
-                        sentence.append(tokens[3])
-                        label.append(3)
-                        noncue_sep.append(0)
-                non_cue_data.append([sentence, label, noncue_sep])
+                        # Maybe a normal or multiword cue. The next few
+                        # words will determine which.
+                        label[0][-1] = 1
+                        aflabel[0][-1] = 1
+                        # Which cue field, for multiword cue altering.
+                        label[1][-1] = i
+                        aflabel[1][-1] = i
 
-            else:  # The line has 1 or more cues
-                num_cues = (len(tokens) - 7) // 3
-                affix_num = -1
-                # cue_count+=num_cues
-                scope = [[] for i in range(num_cues)]
-                # First list is the real labels, second list is to modify
-                # if it is a multi-word cue.
-                label = [[], []]
-                # Generally not a cue, if it is will be set ahead.
-                label[0].append(3)
-                label[1].append(-1)  # Since not a cue, for now.
-                aflabel = [[],[]]
-                aflabel[0].append(3)
-                aflabel[1].append(-1)
-                for i in range(num_cues):
-                    if tokens[7 + 3 * i] != '_':  # Cue field is active
-                        if tokens[8 + 3 * i] != '_':  # Check for affix
-                            label[0][-1] = 0  # Affix
-                            #affix_list.append(tokens[7 + 3 * i]) # pylint: disable=undefined-variable
-                            label[1][-1] = i  # Cue number
-                            aflabel[0][-1] = 0
-                            aflabel[1][-1] = i
-                            # sentence.append(tokens[7+3*i])
-                            # new_word = '##'+tokens[8+3*i]
-                        else:
-                            # Maybe a normal or multiword cue. The next few
-                            # words will determine which.
-                            label[0][-1] = 1
-                            aflabel[0][-1] = 1
-                            # Which cue field, for multiword cue altering.
-                            label[1][-1] = i
-                            aflabel[1][-1] = i
-
-                    if tokens[8 + 3 * i] != '_':
-                        scope[i].append(1)
-                    else:
-                        scope[i].append(2)
-                sentence.append(tokens[3])
-                afsent.append(tokens[3])
-                for line in raw_data:
-                    tokens = line.strip().split()
-                    if len(tokens) == 0:
-                        break
-                    else:
-                        #sentence.append(tokens[3])
-                        token = tokens[3]
-                        affix_flag = False
-                        # Generally not a cue, if it is will be set ahead.
-                        label[0].append(3)
-                        label[1].append(-1)  # Since not a cue, for now.
-                        aflabel[0].append(3)
-                        aflabel[1].append(-1)
-                        for i in range(num_cues):
-                            if tokens[7 + 3 *
-                                        i] != '_':  # Cue field is active
-                                if tokens[8 + 3 *
-                                            i] != '_':  # Check for affix
-                                    label[0][-1] = 0  # Affix
-                                    aflabel[0][-1] = 0
-                                    aflabel[0].append(3)
-                                    label[1][-1] = i  # Cue number
-                                    aflabel[1][-1] = i
-                                    aflabel[1].append(-1)
-                                    affix_flag = True
-                                    affix_num = i
-                                    token = [tokens[3], tokens[7 + 3 * i], tokens[8 + 3 * i]]
-                                else:
-                                    # Maybe a normal or multiword cue. The
-                                    # next few words will determine which.
-                                    label[0][-1] = 1
-                                    aflabel[0][-1] = 1
-                                    # Which cue field, for multiword cue
-                                    # altering.
-                                    label[1][-1] = i
-                                    aflabel[1][-1] = i
-                            if tokens[8 + 3 * i] != '_':
-                                # Detected scope
-                                if tokens[7 + 3 * i] != '_' and i == affix_num:
-                                    # Check if it is affix cue
-                                    scope[i].append(1)
-                                    scope[i].append(1)
-                                else:
-                                    scope[i].append(1)
+                if tokens[8 + 3 * i] != '_':
+                    scope[i].append(1)
+                else:
+                    scope[i].append(2)
+            sentence.append(tokens[3])
+            afsent.append(tokens[3])
+            for line in raw_data:
+                tokens = line.strip().split()
+                if len(tokens) == 0:
+                    break
+                else:
+                    #sentence.append(tokens[3])
+                    token = tokens[3]
+                    affix_flag = False
+                    # Generally not a cue, if it is will be set ahead.
+                    label[0].append(3)
+                    label[1].append(-1)  # Since not a cue, for now.
+                    aflabel[0].append(3)
+                    aflabel[1].append(-1)
+                    for i in range(num_cues):
+                        if tokens[7 + 3 *
+                                    i] != '_':  # Cue field is active
+                            if tokens[8 + 3 *
+                                        i] != '_':  # Check for affix
+                                label[0][-1] = 0  # Affix
+                                aflabel[0][-1] = 0
+                                aflabel[0].append(3)
+                                label[1][-1] = i  # Cue number
+                                aflabel[1][-1] = i
+                                aflabel[1].append(-1)
+                                affix_flag = True
+                                affix_num = i
+                                token = [tokens[3], tokens[7 + 3 * i], tokens[8 + 3 * i]]
                             else:
-                                scope[i].append(2)
-                        if affix_flag is False:
-                            sentence.append(token)
-                            afsent.append(token)
+                                # Maybe a normal or multiword cue. The
+                                # next few words will determine which.
+                                label[0][-1] = 1
+                                aflabel[0][-1] = 1
+                                # Which cue field, for multiword cue
+                                # altering.
+                                label[1][-1] = i
+                                aflabel[1][-1] = i
+                        if tokens[8 + 3 * i] != '_':
+                            # Detected scope
+                            if tokens[7 + 3 * i] != '_' and i == affix_num:
+                                # Check if it is affix cue
+                                scope[i].append(1)
+                                scope[i].append(1)
+                            else:
+                                scope[i].append(1)
                         else:
-                            sentence.append(token[0])
-                            afsent.append(token[1])
-                            afsent.append(f'<AFF>{token[2]}')
-                for i in range(num_cues):
-                    indices = []
-                    for index, j in enumerate(label[1]):
-                        if i == j:
-                            indices.append(index)
-                    count = len(indices)
-                    if count > 1:
-                        # Multi word cue
-                        for j in indices:
-                            label[0][j] = 2
-                
-                sent_scopes = []
-                sent_cues = []
-                or_sents.append(sentence)
-                scope_sent = []
-                for i in range(num_cues):
-                    sc = []
+                            scope[i].append(2)
+                    if affix_flag is False:
+                        sentence.append(token)
+                        afsent.append(token)
+                    else:
+                        sentence.append(token[0])
+                        afsent.append(token[1])
+                        afsent.append(f'<AFF>{token[2]}')
+            for i in range(num_cues):
+                indices = []
+                for index, j in enumerate(label[1]):
+                    if i == j:
+                        indices.append(index)
+                count = len(indices)
+                if count > 1:
+                    # Multi word cue
+                    for j in indices:
+                        label[0][j] = 2
+            
+            sent_scopes = []
+            sent_cues = []
+            or_sents.append(sentence)
+            scope_sent = []
+            for i in range(num_cues):
+                sc = []
 
-                    if affix_num == -1:
-                        # No affix cue in this sent
+                if affix_num == -1:
+                    # No affix cue in this sent
+                    scope_sent.append(sentence)
+
+                    for a, b in zip(label[0], label[1]):
+                        if i == b:
+                            sc.append(a)
+                        else:
+                            sc.append(3)
+                else:
+                    if affix_num == i:
+                        # Detect affix cue
+                        scope_sent.append(afsent)
+
+                        for a, b in zip(aflabel[0], aflabel[1]):
+                            if i == b:
+                                sc.append(a)
+                            else:
+                                sc.append(3)
+                    else:
                         scope_sent.append(sentence)
 
                         for a, b in zip(label[0], label[1]):
@@ -216,288 +234,273 @@ class RawData():
                                 sc.append(a)
                             else:
                                 sc.append(3)
+                sent_scopes.append(scope[i])
+                sent_cues.append(sc)
+            data_scope.append(sent_scopes)
+            scope_cues.append(sent_cues)
+            scope_sents.append(scope_sent)
+            labels.append(label[0])
+            data.append(sentence)
+            num_cue_list.append(num_cues)
+            cue_sep.append([e+1 for e in label[1]])
+    non_cue_sents = [i[0] for i in non_cue_data]
+    non_cue_cues = [i[1] for i in non_cue_data]
+    non_cue_sep = [i[2] for i in non_cue_data]
+    non_cue_num = [0 for i in non_cue_data]
+    sherlock_cues = (data + non_cue_sents, labels + non_cue_cues, cue_sep+non_cue_sep, num_cue_list+non_cue_num)
+    sherlock_scopes = (or_sents, scope_sents, scope_cues, data_scope)
+    if param.label_dim == 4:
+        for si, sent_cues in enumerate(sherlock_scopes[2]):
+            for ci, cues in enumerate(sent_cues):
+                for i, e in enumerate(cues):
+                    if e == 0 or e == 1 or e == 2:
+                        sherlock_scopes[3][si][ci][i] = 3
+    return [sherlock_cues, sherlock_scopes, non_cue_sents]
+
+def bioscope(f_path) -> Tuple[List, List, List]:
+    """
+    return: raw data format. (cues, scopes, non_cue_sents)
+        cues (list[list[T]]): (sentences, cue_labels, cue_sep, num_cues)
+            cue_sep is the seperation label of cues. 
+            num_cues notes the number of cues in this sent.
+        scopes (list[list[T]]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
+            where n = number of cues in this sentence.
+        non_cue_sents: sentences that does not contain negation.
+    """
+    file = open(f_path, encoding='utf-8')
+    sentences = []
+    for s in file:
+        sentences += re.split("(<.*?>)", html.unescape(s))
+    cue_sentence = []
+    cue_cues = []
+    non_cue_data = []
+    scope_cues = []
+    scope_scopes = []
+    scope_sentences = []
+    scope_orsents = []
+    sentence = []
+    cue = {}
+    scope = {}
+    in_scope = []
+    in_cue = []
+    word_num = 0
+    c_idx = []
+    s_idx = []
+    in_sentence = 0
+    num_cue_list = []
+    cue_sep = []
+    for token in sentences:
+        if token == '':
+            continue
+        elif '<sentence' in token:
+            in_sentence = 1
+        elif '<cue' in token:
+            if 'negation' in token:
+                in_cue.append(
+                    str(re.split('(ref=".*?")', token)[1][4:]))
+                c_idx.append(
+                    str(re.split('(ref=".*?")', token)[1][4:]))
+                cue[c_idx[-1]] = []
+        elif '</cue' in token:
+            in_cue = in_cue[:-1]
+        elif '<xcope' in token:
+            # print(re.split('(id=".*?")',token)[1][3:])
+            in_scope.append(str(re.split('(id=".*?")', token)[1][3:]))
+            s_idx.append(str(re.split('(id=".*?")', token)[1][3:]))
+            scope[s_idx[-1]] = []
+        elif '</xcope' in token:
+            in_scope = in_scope[:-1]
+        elif '</sentence' in token:
+            #print(cue, scope)
+            if len(cue.keys()) == 0:
+                # no cue in this sent
+                non_cue_data.append([sentence, [3]*len(sentence), [0]*len(sentence)])
+            else:
+                cue_sentence.append(sentence)
+                cue_cues.append([3]*len(sentence))
+                cue_sep.append([0]*len(sentence))
+                scope_sentence = []
+                scope_subscope = []
+                scope_subcues = []
+                for count, i in enumerate(cue.keys()):
+                    scope_sentence.append(sentence)
+                    scope_subcues.append([3]*len(sentence))
+                    if len(cue[i]) == 1:
+                        cue_cues[-1][cue[i][0]] = 1
+                        scope_subcues[-1][cue[i][0]] = 1
+                        cue_sep[-1][cue[i][0]] = count + 1
                     else:
-                        if affix_num == i:
-                            # Detect affix cue
-                            scope_sent.append(afsent)
+                        for c in cue[i]:
+                            cue_cues[-1][c] = 2
+                            scope_subcues[-1][c] = 2
+                            cue_sep[-1][c] = count + 1
+                    scope_subscope.append([2]*len(sentence))
 
-                            for a, b in zip(aflabel[0], aflabel[1]):
-                                if i == b:
-                                    sc.append(a)
-                                else:
-                                    sc.append(3)
-                        else:
-                            scope_sent.append(sentence)
+                    if i in scope.keys():
+                        for s in scope[i]:
+                            scope_subscope[-1][s] = 1
+                scope_orsents.append(sentence)
+                scope_sentences.append(scope_sentence)
+                scope_cues.append(scope_subcues)
+                scope_scopes.append(scope_subscope)
+            num_cue_list.append(len(cue.keys()))
 
-                            for a, b in zip(label[0], label[1]):
-                                if i == b:
-                                    sc.append(a)
-                                else:
-                                    sc.append(3)
-                    sent_scopes.append(scope[i])
-                    sent_cues.append(sc)
-                data_scope.append(sent_scopes)
-                scope_cues.append(sent_cues)
-                scope_sents.append(scope_sent)
-                labels.append(label[0])
-                data.append(sentence)
-                num_cue.append(num_cues)
-                cue_sep.append([e+1 for e in label[1]])
-        non_cue_sents = [i[0] for i in non_cue_data]
-        non_cue_cues = [i[1] for i in non_cue_data]
-        non_cue_sep = [i[2] for i in non_cue_data]
-        sherlock_cues = (data + non_cue_sents, labels + non_cue_cues, cue_sep+non_cue_sep, num_cue)
-        sherlock_scopes = (or_sents, scope_sents, scope_cues, data_scope)
-        if param.label_dim == 4:
-            for si, sent_cues in enumerate(sherlock_scopes[2]):
-                for ci, cues in enumerate(sent_cues):
-                    for i, e in enumerate(cues):
-                        if e == 0 or e == 1 or e == 2:
-                            sherlock_scopes[3][si][ci][i] = 3
-        return [sherlock_cues, sherlock_scopes, non_cue_sents]
-
-    def bioscope(self, f_path) -> Tuple[List, List, List]:
-        """
-            return: raw data format. (cues, scopes, non_cue_sents)
-                cues (list[list[T]]): (sentences, cue_labels, cue_sep, num_cues)
-                    cue_sep is the seperation label of cues. 
-                    num_cues notes the number of cues in this sent.
-                scopes (list[list[T]]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
-                    where n = number of cues in this sentence.
-                non_cue_sents: sentences that does not contain negation.
-        """
-        file = open(f_path, encoding='utf-8')
-        sentences = []
-        for s in file:
-            sentences += re.split("(<.*?>)", html.unescape(s))
-        cue_sentence = []
-        cue_cues = []
-        non_cue_data = []
-        scope_cues = []
-        scope_scopes = []
-        scope_sentences = []
-        scope_orsents = []
-        sentence = []
-        cue = {}
-        scope = {}
-        in_scope = []
-        in_cue = []
-        word_num = 0
-        c_idx = []
-        s_idx = []
-        in_sentence = 0
-        num_cue = []
-        cue_sep = []
-        for token in sentences:
-            if token == '':
-                continue
-            elif '<sentence' in token:
-                in_sentence = 1
-            elif '<cue' in token:
-                if 'negation' in token:
-                    in_cue.append(
-                        str(re.split('(ref=".*?")', token)[1][4:]))
-                    c_idx.append(
-                        str(re.split('(ref=".*?")', token)[1][4:]))
-                    cue[c_idx[-1]] = []
-            elif '</cue' in token:
-                in_cue = in_cue[:-1]
-            elif '<xcope' in token:
-                # print(re.split('(id=".*?")',token)[1][3:])
-                in_scope.append(str(re.split('(id=".*?")', token)[1][3:]))
-                s_idx.append(str(re.split('(id=".*?")', token)[1][3:]))
-                scope[s_idx[-1]] = []
-            elif '</xcope' in token:
-                in_scope = in_scope[:-1]
-            elif '</sentence' in token:
-                #print(cue, scope)
-                if len(cue.keys()) == 0:
-                    # no cue in this sent
-                    non_cue_data.append([sentence, [3]*len(sentence), [0]*len(sentence)])
-                else:
-                    cue_sentence.append(sentence)
-                    cue_cues.append([3]*len(sentence))
-                    cue_sep.append([0]*len(sentence))
-                    scope_sentence = []
-                    scope_subscope = []
-                    scope_subcues = []
-                    for i in cue.keys():
-                        scope_sentence.append(sentence)
-                        scope_subcues.append([3]*len(sentence))
-                        if len(cue[i]) == 1:
-                            cue_cues[-1][cue[i][0]] = 1
-                            scope_subcues[-1][cue[i][0]] = 1
-                            cue_sep[-1][cue[i][0]] = i
-                        else:
-                            for c in cue[i]:
-                                cue_cues[-1][c] = 2
-                                scope_subcues[-1][c] = 2
-                                cue_sep[-1][c] = i
-                        scope_subscope.append([2]*len(sentence))
-
-                        if i in scope.keys():
-                            for s in scope[i]:
-                                scope_subscope[-1][s] = 1
-                    scope_orsents.append(sentence)
-                    scope_sentences.append(scope_sentence)
-                    scope_cues.append(scope_subcues)
-                    scope_scopes.append(scope_subscope)
-                num_cue.append(len(cue.keys()))
-
-                sentence = []
-                cue = {}
-                scope = {}
-                in_scope = []
-                in_cue = []
-                word_num = 0
-                in_sentence = 0
-                c_idx = []
-                s_idx = []
-            elif '<' not in token:
-                if in_sentence == 1:
-                    words = token.split()
-                    sentence += words
-                    if len(in_cue) != 0:
-                        for i in in_cue:
-                            cue[i] += [word_num +
+            sentence = []
+            cue = {}
+            scope = {}
+            in_scope = []
+            in_cue = []
+            word_num = 0
+            in_sentence = 0
+            c_idx = []
+            s_idx = []
+        elif '<' not in token:
+            if in_sentence == 1:
+                words = token.split()
+                sentence += words
+                if len(in_cue) != 0:
+                    for i in in_cue:
+                        cue[i] += [word_num +
+                                    i for i in range(len(words))]
+                elif len(in_scope) != 0:
+                    for i in in_scope:
+                        scope[i] += [word_num +
                                         i for i in range(len(words))]
-                    elif len(in_scope) != 0:
-                        for i in in_scope:
-                            scope[i] += [word_num +
-                                            i for i in range(len(words))]
-                    word_num += len(words)
-        non_cue_sents = [i[0] for i in non_cue_data]
-        non_cue_cues = [i[1] for i in non_cue_data]
-        non_cue_sep = [i[2] for i in non_cue_data]
-        if param.label_dim == 4:
-            for ci, c in enumerate(scope_cues):
-                for i, e in enumerate(c):
-                    if e == 0 or e == 1 or e == 2:
-                        scope_scopes[ci][i] = 3
-        return [(cue_sentence+non_cue_sents, cue_cues+non_cue_cues, cue_sep+non_cue_sep, num_cue), 
-                (scope_orsents, scope_sentences, scope_cues, scope_scopes),
-                non_cue_sents]
+                word_num += len(words)
+    non_cue_sents = [i[0] for i in non_cue_data]
+    non_cue_cues = [i[1] for i in non_cue_data]
+    non_cue_sep = [i[2] for i in non_cue_data]
+    non_cue_num = [0 for i in non_cue_data]
+    if param.label_dim == 4:
+        for ci, c in enumerate(scope_cues):
+            for i, e in enumerate(c):
+                if e == 0 or e == 1 or e == 2:
+                    scope_scopes[ci][i] = 3
+    return [(cue_sentence+non_cue_sents, cue_cues+non_cue_cues, cue_sep+non_cue_sep, num_cue_list+non_cue_num), 
+            (scope_orsents, scope_sentences, scope_cues, scope_scopes),
+            non_cue_sents]
 
-    def sfu_review(self, f_path, cue_sents_only=cue_sents_only, frac_no_cue_sents=1.0) -> Tuple[List, List, List]:
-        """
-            return: raw data format. (cues, scopes, non_cue_sents)
-                cues (list[list[T]]): (sentences, cue_labels)
-                scopes (list[list[T]]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
-                    where n = number of cues in this sentence.
-                non_cue_sents: sentences that does not contain negation.
-        """
-        file = open(f_path, encoding='utf-8')
-        sentences = []
-        for s in file:
-            sentences += re.split("(<.*?>)", html.unescape(s))
-        cue_sentence = []
-        cue_cues = []
-        scope_cues = []
-        scope_scopes = []
-        scope_sentence = []
-        scope_sentences = []
-        scope_orsents = []
-        sentence = []
-        cue = {}
-        scope = {}
-        in_scope = []
-        in_cue = []
-        word_num = 0
-        c_idx = []
-        non_cue_data = []
-        s_idx = []
-        in_word = 0
-        num_cue = []
-        cue_sep = []
-        for token in sentences:
-            if token == '':
-                continue
-            elif token == '<W>':
-                in_word = 1
-            elif token == '</W>':
-                in_word = 0
-                word_num += 1
-            elif '<cue' in token:
-                if 'negation' in token:
-                    in_cue.append(
-                        int(re.split('(ID=".*?")', token)[1][4:-1]))
-                    c_idx.append(
-                        int(re.split('(ID=".*?")', token)[1][4:-1]))
-                    cue[c_idx[-1]] = []
-            elif '</cue' in token:
-                in_cue = in_cue[:-1]
-            elif '<xcope' in token:
-                continue
-            elif '</xcope' in token:
-                in_scope = in_scope[:-1]
-            elif '<ref' in token:
-                in_scope.append([int(i) for i in re.split(
-                    '(SRC=".*?")', token)[1][5:-1].split(' ')])
-                s_idx.append([int(i) for i in re.split(
-                    '(SRC=".*?")', token)[1][5:-1].split(' ')])
-                for i in s_idx[-1]:
-                    scope[i] = []
-            elif '</SENTENCE' in token:
-                if len(cue.keys()) == 0:
-                    non_cue_data.append([sentence, [3]*len(sentence), [0]*len(sentence)])
-                else:
-                    cue_sentence.append(sentence)
-                    cue_cues.append([3]*len(sentence))
-                    cue_sep.append([0]*len(sentence))
-                    scope_sentence = []
-                    scope_subscope = []
-                    scope_subcues = []
-                    for i in cue.keys():
-                        scope_sentence.append(sentence)
-                        scope_subcues.append([3]*len(sentence))
-                        if len(cue[i]) == 1:
-                            cue_cues[-1][cue[i][0]] = 1
-                            scope_subcues[-1][cue[i][0]] = 1
-                            cue_sep[-1][cue[i][0]] = i
-                        else:
-                            for c in cue[i]:
-                                cue_cues[-1][c] = 2
-                                scope_subcues[-1][c] = 2
-                                cue_sep[-1][c] = i
-                        scope_subscope.append([2]*len(sentence))
-                        if i in scope.keys():
-                            for s in scope[i]:
-                                scope_subscope[-1][s] = 1
-                    scope_orsents.append(sentence)
-                    scope_sentences.append(scope_sentence)
-                    scope_cues.append(scope_subcues)
-                    scope_scopes.append(scope_subscope)
-                    num_cue.append(len(cue.keys()))
-                sentence = []
-                cue = {}
-                scope = {}
-                in_scope = []
-                in_cue = []
-                word_num = 0
-                in_word = 0
-                c_idx = []
-                s_idx = []
-            elif '<' not in token:
-                if in_word == 1:
-                    if len(in_cue) != 0:
-                        for i in in_cue:
-                            cue[i].append(word_num)
-                    if len(in_scope) != 0:
-                        for i in in_scope:
-                            for j in i:
-                                scope[j].append(word_num)
-                    sentence.append(token)
-        non_cue_sents = [i[0] for i in non_cue_data]
-        non_cue_cues = [i[1] for i in non_cue_data]
-        non_cue_sep = [i[2] for i in non_cue_data]
-        if param.label_dim == 4:
-            for ci, c in enumerate(scope_cues):
-                for i, e in enumerate(c):
-                    if e == 0 or e == 1 or e == 2:
-                        scope_scopes[ci][i] = 3
+def sfu_review(f_path) -> Tuple[List, List, List]:
+    """
+    return: raw data format. (cues, scopes, non_cue_sents)
+        cues (list[list[T]]): (sentences, cue_labels)
+        scopes (list[list[T]]): (original_sent, sentences[n], cue_labels[n], scope_labels[n])
+            where n = number of cues in this sentence.
+        non_cue_sents: sentences that does not contain negation.
+    """
+    file = open(f_path, encoding='utf-8')
+    sentences = []
+    for s in file:
+        sentences += re.split("(<.*?>)", html.unescape(s))
+    cue_sentence = []
+    cue_cues = []
+    scope_cues = []
+    scope_scopes = []
+    scope_sentence = []
+    scope_sentences = []
+    scope_orsents = []
+    sentence = []
+    cue = {}
+    scope = {}
+    in_scope = []
+    in_cue = []
+    word_num = 0
+    c_idx = []
+    non_cue_data = []
+    s_idx = []
+    in_word = 0
+    num_cue_list = []
+    cue_sep = []
+    for token in sentences:
+        if token == '':
+            continue
+        elif token == '<W>':
+            in_word = 1
+        elif token == '</W>':
+            in_word = 0
+            word_num += 1
+        elif '<cue' in token:
+            if 'negation' in token:
+                in_cue.append(
+                    int(re.split('(ID=".*?")', token)[1][4:-1]))
+                c_idx.append(
+                    int(re.split('(ID=".*?")', token)[1][4:-1]))
+                cue[c_idx[-1]] = []
+        elif '</cue' in token:
+            in_cue = in_cue[:-1]
+        elif '<xcope' in token:
+            continue
+        elif '</xcope' in token:
+            in_scope = in_scope[:-1]
+        elif '<ref' in token:
+            in_scope.append([int(i) for i in re.split(
+                '(SRC=".*?")', token)[1][5:-1].split(' ')])
+            s_idx.append([int(i) for i in re.split(
+                '(SRC=".*?")', token)[1][5:-1].split(' ')])
+            for i in s_idx[-1]:
+                scope[i] = []
+        elif '</SENTENCE' in token:
+            if len(cue.keys()) == 0:
+                non_cue_data.append([sentence, [3]*len(sentence), [0]*len(sentence)])
+            else:
+                cue_sentence.append(sentence)
+                cue_cues.append([3]*len(sentence))
+                cue_sep.append([0]*len(sentence))
+                scope_sentence = []
+                scope_subscope = []
+                scope_subcues = []
+                for count, i in enumerate(cue.keys()):
+                    scope_sentence.append(sentence)
+                    scope_subcues.append([3]*len(sentence))
+                    if len(cue[i]) == 1:
+                        cue_cues[-1][cue[i][0]] = 1
+                        scope_subcues[-1][cue[i][0]] = 1
+                        cue_sep[-1][cue[i][0]] = count + 1
+                    else:
+                        for c in cue[i]:
+                            cue_cues[-1][c] = 2
+                            scope_subcues[-1][c] = 2
+                            cue_sep[-1][c] = count + 1
+                    scope_subscope.append([2]*len(sentence))
+                    if i in scope.keys():
+                        for s in scope[i]:
+                            scope_subscope[-1][s] = 1
+                scope_orsents.append(sentence)
+                scope_sentences.append(scope_sentence)
+                scope_cues.append(scope_subcues)
+                scope_scopes.append(scope_subscope)
+                num_cue_list.append(len(cue.keys()))
+            sentence = []
+            cue = {}
+            scope = {}
+            in_scope = []
+            in_cue = []
+            word_num = 0
+            in_word = 0
+            c_idx = []
+            s_idx = []
+        elif '<' not in token:
+            if in_word == 1:
+                if len(in_cue) != 0:
+                    for i in in_cue:
+                        cue[i].append(word_num)
+                if len(in_scope) != 0:
+                    for i in in_scope:
+                        for j in i:
+                            scope[j].append(word_num)
+                sentence.append(token)
+    non_cue_sents = [i[0] for i in non_cue_data]
+    non_cue_cues = [i[1] for i in non_cue_data]
+    non_cue_sep = [i[2] for i in non_cue_data]
+    non_cue_num = [0 for i in non_cue_data]
+    if param.label_dim == 4:
+        for ci, c in enumerate(scope_cues):
+            for i, e in enumerate(c):
+                if e == 0 or e == 1 or e == 2:
+                    scope_scopes[ci][i] = 3
 
-        return [(cue_sentence+non_cue_sents, cue_cues+non_cue_cues, cue_sep+non_cue_sep, num_cue), 
-                (scope_orsents, scope_sentences, scope_cues, scope_scopes), non_cue_sents]
+    return [(cue_sentence+non_cue_sents, cue_cues+non_cue_cues, cue_sep+non_cue_sep, num_cue_list+non_cue_num), 
+            (scope_orsents, scope_sentences, scope_cues, scope_scopes), non_cue_sents]
 
 
 

@@ -52,7 +52,7 @@ class CueFeature():
         self.num_cues = num_cues
 
 class ScopeFeature(object):
-    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, scopes):
+    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, scopes, num_cues):
         self.guid = guid
         self.or_sent = or_sent
         self.sents = sents
@@ -62,9 +62,10 @@ class ScopeFeature(object):
         self.input_len = input_len
         self.cues = cues
         self.scopes = scopes
+        self.num_cues = num_cues
 
 class PipelineScopeFeature(object):
-    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, gold_cues, gold_scopes):
+    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, gold_cues, gold_scopes, gold_num_cues):
         self.guid = guid
         self.or_sent = or_sent
         self.sents = sents
@@ -75,6 +76,7 @@ class PipelineScopeFeature(object):
         self.cues = cues
         self.gold_cues = gold_cues
         self.gold_scopes = gold_scopes
+        self.gold_num_cues = gold_num_cues
 
 FeatureLike = Union[CueFeature, ScopeFeature, PipelineScopeFeature]
 
@@ -87,7 +89,7 @@ class Processor(object):
         return RawData(input_file, dataset_name=dataset_name)
 
     def create_examples(self, data: RawData, example_type: str, cue_or_scope: str, cached_file=None,
-                        test_size=0.15, val_size=0.15) -> Union[List[ExampleLike], Tuple[List, List, List]]:
+                        test_size=0.2, val_size=0.1) -> Union[List[ExampleLike], Tuple[List, List, List]]:
         """
         Create packed example format for input data. Do train-test split if specified.
 
@@ -139,9 +141,13 @@ class Processor(object):
         elif example_type.lower() == 'split':
             # Note: if set example type to split, will return both cue and scope examples
             random_state = np.random.randint(1, 2020)
-            tr_cue_, te_cue, tr_scope_, te_scope = train_test_split(cue_examples, scope_examples, test_size=test_size, random_state=random_state)
+            tr_cue_, te_cue = train_test_split(cue_examples, test_size=test_size, random_state=random_state)
+            tr_scope_, te_scope = train_test_split(scope_examples, test_size=test_size, random_state=random_state)
+            _, te_non_cue_sents = train_test_split(data.non_cue_sents, test_size=test_size, random_state=random_state)
             random_state2 = np.random.randint(1, 2020)
-            tr_cue, dev_cue, tr_scope, dev_scope = train_test_split(tr_cue_, tr_scope_, test_size=(
+            tr_cue, dev_cue = train_test_split(tr_cue_, test_size=(
+                val_size / (1 - test_size)), random_state=random_state2)
+            tr_scope, dev_scope = train_test_split(tr_scope_, test_size=(
                 val_size / (1 - test_size)), random_state=random_state2)
             for i, e in enumerate(tr_cue):
                 e.guid = f'train-{i}'
@@ -163,6 +169,7 @@ class Processor(object):
                 torch.save(tr_scope, f'train_scope_{cached_file}')
                 torch.save(te_scope, f'test_scope_{cached_file}')
                 torch.save(dev_scope, f'dev_scope_{cached_file}')
+                torch.save(te_non_cue_sents, f'ns_{cached_file}')
             return (tr_cue, dev_cue, te_cue), (tr_scope, dev_scope, te_scope)
     
     def load_examples(self, file: str):
@@ -177,7 +184,7 @@ class Processor(object):
         return torch.load(file)
 
     def create_features(self, data: List[ExampleLike], cue_or_scope: str,
-                        max_seq_len: int, is_bert=False) -> List[Union[CueFeature, ScopeFeature]]:
+                        max_seq_len: int=128, is_bert=False) -> List[Union[CueFeature, ScopeFeature]]:
         """
         Create packed 
         """
@@ -451,7 +458,7 @@ class Processor(object):
                     
                     feature = ScopeFeature(guid=guid, or_sent=example.sent, sents=wrap_sents, input_ids=wrap_input_id, 
                                            padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
-                                           input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes)
+                                           input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes, num_cues=example.num_cues)
                 features.append(feature)
         return features
 
@@ -640,24 +647,87 @@ class Processor(object):
                 
             feature = PipelineScopeFeature(guid=example.guid, or_sent=example.sent, sents=wrap_sents, input_ids=wrap_input_id, 
                                     padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
-                                    input_len=wrap_input_len, cues=wrap_cues, gold_cues=gold_cues, gold_scopes=gold_scopes)
+                                    input_len=wrap_input_len, cues=wrap_cues, gold_cues=gold_cues, gold_scopes=gold_scopes, gold_num_cues=example.num_cues)
             features.append(feature)
         return features
     
-    def create_dataset(self, features, cue_or_scope: str, is_sorted=False, is_bert=False):
-        # Convert to Tensors and build dataset
+    def create_dataset(self, features: List[FeatureLike], cue_or_scope: str, example_type: str, 
+                       is_sorted=False, is_bert=False) -> Union[Dataset, TensorDataset]:
+        """
+        Pack the features to dataset. If cue_or_scope is cue or scope, 
+        return a TensorDataset for faster processing.
+        If cue_or_scope is pipeline and example_type is dev or test, return a Dataset,
+        in which the features still keep to the packed scope format.
+
+        params:
+            features (list): collection of features
+            cue_or_scope (str): in ['cue', 'scope', 'pipeline']
+            example_type (str): in ['train', 'dev', 'test']
+            is_sorted (bool): to specify whether to sort the dataset or not. Save time and space when dumping.
+            is_bert (bool)
+
+        return:
+            cue_or_scope == cue:
+                TensorDataset(input_ids, padding_mask, cues, cue_sep, input_len, subword_mask)
+            cue_or_scope == scope:
+        """
+        
         if is_sorted:
-            print("sorted data by th length of input")
+            print('sorted data by th length of input')
             features = sorted(features, key=lambda x: x.input_len, reverse=True)
-        dataset = Dataset(features)
-        return dataset
+        if cue_or_scope.lower() == 'cue':
+            input_ids = []
+            padding_mask = []
+            subword_mask = []
+            cues = []
+            cue_sep = []
+            input_len = []
+            for feature in features:
+                input_ids.append(feature.input_ids)
+                padding_mask.append(feature.padding_mask)
+                subword_mask.append(feature.subword_mask)
+                cues.append(feature.cues)
+                cue_sep.append(feature.cue_sep)
+                input_len.append(feature.input_len)
+            
+            input_ids = torch.LongTensor(input_ids)
+            padding_mask = torch.LongTensor(padding_mask)
+            cues = torch.LongTensor(cues)
+            cue_sep = torch.LongTensor(cue_sep)
+            input_len = torch.LongTensor(input_len)
+            subword_mask = torch.LongTensor(subword_mask)
+            return TensorDataset(input_ids, padding_mask, cues, cue_sep, input_len, subword_mask)
+        elif cue_or_scope.lower() == 'scope':
+            input_ids = []
+            padding_mask = []
+            subword_mask = []
+            scopes = []
+            input_len = []
+            for feature in features:
+                for cue_i in range(feature.num_cues):
+                    input_ids.append(feature.input_ids[cue_i])
+                    padding_mask.append(feature.padding_mask[cue_i])
+                    scopes.append(feature.scopes[cue_i])
+                    subword_mask.append(feature.subword_mask[cue_i])
+                    input_len.append(feature.input_len[cue_i])
+            
+            input_ids = torch.LongTensor(input_ids)
+            padding_mask = torch.LongTensor(padding_mask)
+            scopes = torch.LongTensor(scopes)
+            input_len = torch.LongTensor(input_len)
+            subword_mask = torch.LongTensor(subword_mask)
+            return TensorDataset(input_ids, padding_mask, scopes, input_len, subword_mask)
+        elif cue_or_scope.lower() == 'pipeline' and example_type.lower() == 'test':
+            return Dataset(features)
+        else:
+            raise ValueError(cue_or_scope, example_type)
     
-    def get_tokenizer(self, data: Tuple[InputExample], is_bert=False, do_lower_case=False, bert_path=None):
+    def get_tokenizer(self, data: Tuple[InputExample], is_bert=False, do_lower_case=False, bert_path=None, non_cue_sents: List[str]=None):
         if is_bert:
             self.tokenizer = BertTokenizer.from_pretrained(
-                bert_path, do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
+                bert_path=param.bert_path, do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
         else:
-            self.tokenizer = OtherTokenizer(data, external_vocab=False)
+            self.tokenizer = OtherTokenizer(data, external_vocab=False, non_cue_sents=non_cue_sents)
 
 
 class Dictionary(object):
@@ -718,8 +788,8 @@ class NaiveTokenizer(object):
         return " ".join(token_list)
 
 class OtherTokenizer(NaiveTokenizer):
-    def __init__(self, data, emb=param.embedding, external_vocab=False):
-        super(OtherTokenizer, self).__init__(data)
+    def __init__(self, data, emb=param.embedding, external_vocab=False, non_cue_sents=None):
+        super(OtherTokenizer, self).__init__(data, non_cue_sents)
         if external_vocab is True:
             with open('reduced_fasttext_vocab.bin', 'rb') as f:
                 vocab = _pickle.load(f)
@@ -738,12 +808,10 @@ class OtherTokenizer(NaiveTokenizer):
 if __name__ == "__main__":
     proc = Processor()
     #proc.get_tokenizer(data=None, is_bert=True, bert_path='bert-base-cased')
-    data = proc.read_data(param.data_path['sherlock']['train'], dataset_name='sherlock')
-    examples = proc.create_examples(data=data,
-                    example_type='train',
-                    cached_file=None,
-                    cue_or_scope='scope')
-    proc.get_tokenizer(data=examples, is_bert=False)
-    features = proc.create_features(data=examples, max_seq_len=128, is_bert=False,
-                    cue_or_scope='scope')
+    sfu_data = proc.read_data(param.data_path['sfu'], 'sfu')
+    proc.create_examples(sfu_data, 'split', 'cue', 'sfu.pt')
+    bio_a_data = proc.read_data(param.data_path['bioscope_abstracts'], 'bioscope')
+    proc.create_examples(bio_a_data, 'split', 'cue', 'bioA.pt')
+    bio_f_data = proc.read_data(param.data_path['bioscope_full'], 'bioscope')
+    proc.create_examples(bio_f_data, 'split', 'cue', 'bioF.pt')
     print()
