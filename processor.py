@@ -192,7 +192,7 @@ class Processor(object):
         features = []
         if cue_or_scope == 'cue':
             for example in data:
-                sent = example.sent
+                sent = example.sent.split()
                 guid = example.guid
                 num_cues = example.num_cues
                 if is_bert:
@@ -222,8 +222,8 @@ class Processor(object):
                     subword_mask.append(1)
                     new_cues.insert(0, 3)
                     new_cues.append(3)
-                    new_cuesep.insert(0, 3)
-                    new_cuesep.append(3)
+                    new_cuesep.insert(0, 0)
+                    new_cuesep.append(0)
                     input_ids = self.tokenizer.convert_tokens_to_ids(new_text)
                     padding_mask = [1] * len(input_ids)
                     input_len = len(input_ids)
@@ -233,6 +233,11 @@ class Processor(object):
                         subword_mask.append(0)
                         new_cues.append(3)
                         new_cuesep.append(0)
+                    assert len(input_ids) == max_seq_len
+                    assert len(padding_mask) == max_seq_len
+                    assert len(subword_mask) == max_seq_len
+                    assert len(new_cues) == max_seq_len
+                    assert len(new_cuesep) == max_seq_len
                     feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids, 
                                          padding_mask=padding_mask, subword_mask=subword_mask,
                                          input_len=input_len, cues=new_cues, cue_sep=new_cuesep, num_cues=num_cues)
@@ -242,8 +247,8 @@ class Processor(object):
                     cues.insert(0, 3)
                     cues.append(3)
                     cue_sep = example.cue_sep
-                    cue_sep.insert(0, 3)
-                    cue_sep.append(3)
+                    cue_sep.insert(0, 0)
+                    cue_sep.append(0)
                     words = self.tokenizer.tokenize(sent)
                     words.insert(0, '[CLS]')
                     words.append('[SEP]')
@@ -462,7 +467,7 @@ class Processor(object):
                 features.append(feature)
         return features
 
-    def create_features_pipeline(self, data: List[ScopeFeature], cue_model,
+    def create_features_pipeline(self, data: List[ScopeFeature], cue_model, non_cue_examples,
                         max_seq_len: int, is_bert=False):
         """
         Create scope feature for pipeline TESTING. The cue info was predicted with a trained cue 
@@ -602,6 +607,10 @@ class Processor(object):
                         padding_mask.append(0)
                         new_masks.append(0)
                         new_cues.append(3)
+                    assert len(input_id) == max_seq_len
+                    assert len(padding_mask) == max_seq_len
+                    assert len(new_masks) == max_seq_len
+                    assert len(new_cues) == max_seq_len
                     wrap_sents.append(new_text)
                     wrap_input_id.append(input_id)
                     wrap_subword_mask.append(new_masks)
@@ -725,7 +734,7 @@ class Processor(object):
     def get_tokenizer(self, data: Tuple[InputExample], is_bert=False, do_lower_case=False, bert_path=None, non_cue_sents: List[str]=None):
         if is_bert:
             self.tokenizer = BertTokenizer.from_pretrained(
-                bert_path=param.bert_path, do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
+                pretrained_model_name_or_path=param.bert_path, do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
         else:
             self.tokenizer = OtherTokenizer(data, external_vocab=False, non_cue_sents=non_cue_sents)
 
@@ -807,11 +816,12 @@ class OtherTokenizer(NaiveTokenizer):
 
 if __name__ == "__main__":
     proc = Processor()
-    #proc.get_tokenizer(data=None, is_bert=True, bert_path='bert-base-cased')
-    sfu_data = proc.read_data(param.data_path['sfu'], 'sfu')
-    proc.create_examples(sfu_data, 'split', 'cue', 'sfu.pt')
-    bio_a_data = proc.read_data(param.data_path['bioscope_abstracts'], 'bioscope')
-    proc.create_examples(bio_a_data, 'split', 'cue', 'bioA.pt')
-    bio_f_data = proc.read_data(param.data_path['bioscope_full'], 'bioscope')
-    proc.create_examples(bio_f_data, 'split', 'cue', 'bioF.pt')
+    if param.split_and_save:
+        sfu_data = proc.read_data(param.data_path['sfu'], 'sfu')
+        proc.create_examples(sfu_data, 'split', 'cue', 'sfu.pt')
+        bio_a_data = proc.read_data(
+            param.data_path['bioscope_abstracts'], 'bioscope')
+        proc.create_examples(bio_a_data, 'split', 'cue', 'bioA.pt')
+        bio_f_data = proc.read_data(param.data_path['bioscope_full'], 'bioscope')
+        proc.create_examples(bio_f_data, 'split', 'cue', 'bioF.pt')
     print()
