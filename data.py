@@ -6,6 +6,7 @@ from params import param
 
 
 cue_id2label = {0: 'Affix', 1: 'Cue', 2: 'MCue', 3: 'O'}
+cue_label2id = {0: 0, 1: 1, 2: 2, 3: 3}
 scope_id2label = {0: '<PAD>', 1: 'I', 2:'O', 3: 'C', 4: 'B', 5: 'E', 6: 'S'}
 
 class RawData():
@@ -111,14 +112,19 @@ def sherlock(f_path) -> Tuple[List, List, List]:
             aflabel = [[],[]]
             aflabel[0].append(3)
             aflabel[1].append(-1)
+            cue_counter = -1
+            prev_cue_c = -1
             for i in range(num_cues):
                 if tokens[7 + 3 * i] != '_':  # Cue field is active
                     if tokens[8 + 3 * i] != '_':  # Check for affix
                         label[0][-1] = 0  # Affix
                         #affix_list.append(tokens[7 + 3 * i]) # pylint: disable=undefined-variable
-                        label[1][-1] = i  # Cue number
+                        if i != prev_cue_c:
+                            cue_counter += 1
+                        prev_cue_c = i
+                        label[1][-1] = cue_counter  # Cue number
                         aflabel[0][-1] = 0
-                        aflabel[1][-1] = i
+                        aflabel[1][-1] = cue_counter
                         # sentence.append(tokens[7+3*i])
                         # new_word = '##'+tokens[8+3*i]
                     else:
@@ -127,8 +133,11 @@ def sherlock(f_path) -> Tuple[List, List, List]:
                         label[0][-1] = 1
                         aflabel[0][-1] = 1
                         # Which cue field, for multiword cue altering.
-                        label[1][-1] = i
-                        aflabel[1][-1] = i
+                        if i != prev_cue_c:
+                            cue_counter += 1
+                        prev_cue_c = i
+                        label[1][-1] = cue_counter
+                        aflabel[1][-1] = cue_counter
 
                 if tokens[8 + 3 * i] != '_':
                     scope[i].append(1)
@@ -157,8 +166,11 @@ def sherlock(f_path) -> Tuple[List, List, List]:
                                 label[0][-1] = 0  # Affix
                                 aflabel[0][-1] = 0
                                 aflabel[0].append(3)
-                                label[1][-1] = i  # Cue number
-                                aflabel[1][-1] = i
+                                if i != prev_cue_c:
+                                    cue_counter += 1
+                                prev_cue_c = i
+                                label[1][-1] = cue_counter  # Cue number
+                                aflabel[1][-1] = cue_counter
                                 aflabel[1].append(-1)
                                 affix_flag = True
                                 affix_num = i
@@ -170,8 +182,12 @@ def sherlock(f_path) -> Tuple[List, List, List]:
                                 aflabel[0][-1] = 1
                                 # Which cue field, for multiword cue
                                 # altering.
-                                label[1][-1] = i
-                                aflabel[1][-1] = i
+                                if i != prev_cue_c:
+                                    cue_counter += 1
+                                prev_cue_c = i
+                                label[1][-1] = cue_counter
+                                aflabel[1][-1] = cue_counter
+                                
                         if tokens[8 + 3 * i] != '_':
                             # Detected scope
                             if tokens[7 + 3 * i] != '_' and i == affix_num:
