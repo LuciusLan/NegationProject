@@ -316,7 +316,8 @@ def bioscope(f_path) -> Tuple[List, List, List]:
                     str(re.split('(ref=".*?")', token)[1][4:]))
                 c_idx.append(
                     str(re.split('(ref=".*?")', token)[1][4:]))
-                cue[c_idx[-1]] = []
+                if c_idx[-1] not in cue.keys():
+                    cue[c_idx[-1]] = []
         elif '</cue' in token:
             in_cue = in_cue[:-1]
         elif '<xcope' in token:
@@ -376,12 +377,10 @@ def bioscope(f_path) -> Tuple[List, List, List]:
                 sentence += words
                 if len(in_cue) != 0:
                     for i in in_cue:
-                        cue[i] += [word_num +
-                                    i for i in range(len(words))]
+                        cue[i].extend([word_num + i for i in range(len(words))])
                 elif len(in_scope) != 0:
                     for i in in_scope:
-                        scope[i] += [word_num +
-                                        i for i in range(len(words))]
+                        scope[i] += [word_num + i for i in range(len(words))]
                 word_num += len(words)
     non_cue_sents = [i[0] for i in non_cue_data]
     non_cue_cues = [i[1] for i in non_cue_data]
@@ -441,7 +440,8 @@ def sfu_review(f_path) -> Tuple[List, List, List]:
                     int(re.split('(ID=".*?")', token)[1][4:-1]))
                 c_idx.append(
                     int(re.split('(ID=".*?")', token)[1][4:-1]))
-                cue[c_idx[-1]] = []
+                if c_idx[-1] not in cue.keys():
+                    cue[c_idx[-1]] = []
         elif '</cue' in token:
             in_cue = in_cue[:-1]
         elif '<xcope' in token:
