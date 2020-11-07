@@ -35,9 +35,9 @@ class RawData():
             sfu_noncue_sents = []
             for dir_name in os.listdir(file):
                 if '.' not in dir_name:
-                    for f_name in os.listdir(file+"//"+dir_name):
+                    for f_name in os.listdir(os.path.join(file, dir_name)):
                         r_val = sfu_review(
-                            file+"//"+dir_name+'//'+f_name)
+                            os.path.join(file, dir_name, f_name))
                         sfu_cues = [a+b for a, b in zip(sfu_cues, r_val[0])]
                         sfu_scopes = [a+b for a,
                                       b in zip(sfu_scopes, r_val[1])]
@@ -193,7 +193,8 @@ def sherlock(f_path) -> Tuple[List, List, List]:
                             if tokens[7 + 3 * i] != '_' and i == affix_num:
                                 # Check if it is affix cue
                                 scope[i].append(1)
-                                scope[i].append(1)
+                                if param.sherlock_seperate_affix:
+                                    scope[i].append(1)
                             else:
                                 scope[i].append(1)
                         else:
@@ -204,7 +205,7 @@ def sherlock(f_path) -> Tuple[List, List, List]:
                     else:
                         sentence.append(token[0])
                         afsent.append(token[1])
-                        afsent.append(f'<AFF>{token[2]}')
+                        afsent.append('<AFF>'+token[2])
             for i in range(num_cues):
                 indices = []
                 for index, j in enumerate(label[1]):
@@ -233,7 +234,7 @@ def sherlock(f_path) -> Tuple[List, List, List]:
                         else:
                             sc.append(3)
                 else:
-                    if affix_num == i:
+                    if affix_num == i and param.sherlock_seperate_affix:
                         # Detect affix cue
                         scope_sent.append(afsent)
 
@@ -259,18 +260,109 @@ def sherlock(f_path) -> Tuple[List, List, List]:
             data.append(sentence)
             num_cue_list.append(num_cues)
             cue_sep.append([e+1 for e in label[1]])
-    non_cue_sents = [i[0] for i in non_cue_data]
-    non_cue_cues = [i[1] for i in non_cue_data]
-    non_cue_sep = [i[2] for i in non_cue_data]
-    non_cue_num = [0 for i in non_cue_data]
-    sherlock_cues = (data + non_cue_sents, labels + non_cue_cues, cue_sep+non_cue_sep, num_cue_list+non_cue_num)
-    sherlock_scopes = (or_sents, scope_sents, scope_cues, data_scope)
-    if param.label_dim == 4:
-        for si, sent_cues in enumerate(sherlock_scopes[2]):
-            for ci, cues in enumerate(sent_cues):
-                for i, e in enumerate(cues):
-                    if e == 0 or e == 1 or e == 2:
-                        sherlock_scopes[3][si][ci][i] = 3
+
+    new_cue_sents = []
+    new_cue_cues = []
+    new_cue_sep = []
+    for i, sent in enumerate(data):
+        if 'n\'t' in sent:
+            t_sent = []
+            t_cue = []
+            t_sep = []
+            for ii, word in enumerate(sent):
+                if word == 'n\'t':
+                    t_sent[-1] += word
+                    # change the root's (do, can, is, etc.) cue label
+                    # it's possible that even it comes with a n't but is not a cue
+                    t_cue[-1] = labels[i][ii]
+                    t_sep[-1] = cue_sep[i][ii]
+                else:
+                    t_sent.append(word)
+                    t_cue.append(labels[i][ii])
+                    t_sep.append(cue_sep[i][ii])
+            new_cue_sents.append(t_sent)
+            new_cue_cues.append(t_cue)
+            new_cue_sep.append(t_sep)
+        else:
+            new_cue_sents.append(sent)
+            new_cue_cues.append(labels[i])
+            new_cue_sep.append(cue_sep[i])
+
+    new_or_sents = []
+    for i, sent in enumerate(or_sents):
+        if 'n\'t' in sent:
+            t_sent = []
+            for word in sent:
+                if word == 'n\'t':
+                    t_sent[-1] += word
+                else:
+                    t_sent.append(word)
+            new_or_sents.append(t_sent)
+        else:
+            new_or_sents.append(sent)
+    
+    new_scope_sents = []
+    new_scope_cues = []
+    new_scopes = []
+    for i, wraps in enumerate(scope_sents):
+        scope_sent_unit = []
+        scope_cue_unit = []
+        scope_unit = []
+        for si, sent in enumerate(wraps):
+            if 'n\'t' in sent:
+                t_sent = []
+                t_scue = []
+                t_scope = []
+                for wi, word in enumerate(sent):
+                    if word == 'n\'t':
+                        t_sent[-1] += word
+                        t_scue[-1] = scope_cues[i][si][wi]
+                        t_scope[-1] = data_scope[i][si][wi]
+                    else:
+                        t_sent.append(word)
+                        t_scue.append(scope_cues[i][si][wi])
+                        t_scope.append(data_scope[i][si][wi])
+                scope_sent_unit.append(t_sent)
+                scope_cue_unit.append(t_scue)
+                scope_unit.append(t_scope)
+            else:
+                scope_sent_unit.append(sent)
+                scope_cue_unit.append(scope_cues[i][si])
+                scope_unit.append(data_scope[i][si])
+        new_scope_sents.append(scope_sent_unit)
+        new_scope_cues.append(scope_cue_unit)
+        new_scopes.append(scope_unit)
+
+    new_noncue_sents = []
+    for i, sent in enumerate(non_cue_data):
+        if 'n\'t' in sent[0]:
+            t_sent = []
+            for ii, word in enumerate(sent[0]):
+                if word == 'n\'t':
+                    t_sent[-1] += word
+                else:
+                    t_sent.append(word)
+            new_noncue_sents.append(t_sent)
+        else:
+            new_noncue_sents.append(sent[0])
+
+    if param.sherlock_combine_nt:
+        non_cue_sents = new_noncue_sents
+        non_cue_cues = [[3 for i in sent] for sent in new_noncue_sents]
+        non_cue_sep = [[0 for i in sent] for sent in new_noncue_sents]
+        non_cue_num = [0 for sent in new_noncue_sents]
+
+        sherlock_cues = (new_cue_sents + non_cue_sents, new_cue_cues + non_cue_cues, new_cue_sep+non_cue_sep, num_cue_list+non_cue_num)
+        sherlock_scopes = (new_or_sents, new_scope_sents, new_scope_cues, new_scopes)
+    else:
+        non_cue_sents = [i[0] for i in non_cue_data]
+        non_cue_cues = [i[1] for i in non_cue_data]
+        non_cue_sep = [i[2] for i in non_cue_data]
+        non_cue_num = [0 for i in non_cue_data]
+
+        sherlock_cues = (data + non_cue_sents, labels + non_cue_cues, cue_sep+non_cue_sep, num_cue_list+non_cue_num)
+        sherlock_scopes = (or_sents, scope_sents, scope_cues, data_scope)
+    
     return [sherlock_cues, sherlock_scopes, non_cue_sents]
 
 def bioscope(f_path) -> Tuple[List, List, List]:
@@ -534,3 +626,27 @@ class SplitData():
         for e in input_:
             t.extend(e)
         return t
+
+class SplitMoreData():
+    def __init__(self, cue, scope, non_cue_sents):
+        if isinstance(cue, list):
+            self.cues = self.combine_lists(cue)
+        if isinstance(scope, list):
+            self.scopes = self.combine_lists(scope)
+        if isinstance(non_cue_sents, list):
+            self.non_cue_sents = self.pack_(non_cue_sents)
+
+    def pack_(self, input_):
+        t = []
+        for e in input_:
+            t.extend(e)
+        return t
+
+    def combine_lists(self, input_: List[List]):
+        tmp = input_[0]
+        for i, e in enumerate(input_):
+            if i == 0:
+                continue
+            for ii, elem in enumerate(e):
+                tmp[ii].extend(elem)
+        return tmp
