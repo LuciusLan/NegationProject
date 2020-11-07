@@ -1,4 +1,7 @@
 import random
+import math
+import copy
+import gc
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Dataset
 from sklearn.model_selection import train_test_split
@@ -13,6 +16,7 @@ from util import pad_sequences
 from data import RawData
 from params import param
 
+
 class InputExample():
     def __init__(self, guid, sent: str, subword_mask=None):
         """
@@ -22,6 +26,7 @@ class InputExample():
         self.sent = sent
         self.subword_mask = subword_mask
 
+
 class CueExample(InputExample):
     def __init__(self, cues, cue_sep, num_cues, **kwargs):
         super().__init__(**kwargs)
@@ -29,15 +34,20 @@ class CueExample(InputExample):
         self.num_cues = num_cues
         self.cue_sep = cue_sep
 
+
 class ScopeExample(InputExample):
-    def __init__(self, cues: List[int], scopes: List[T], sc_sent: List[str], **kwargs):
+    def __init__(self, cues: List[int], scopes: List[T], sc_sent: List[str], segments=None, **kwargs):
         super().__init__(**kwargs)
         self.num_cues = len(scopes)
         self.cues = cues
         self.scopes = scopes
         self.sc_sent = sc_sent
+        if segments is not None:
+            self.segments = segments
+
 
 ExampleLike = Union[CueExample, ScopeExample, InputExample]
+
 
 class CueFeature():
     def __init__(self, guid, sent, input_ids, padding_mask, subword_mask, input_len, cues, cue_sep, num_cues):
@@ -51,8 +61,9 @@ class CueFeature():
         self.cue_sep = cue_sep
         self.num_cues = num_cues
 
+
 class ScopeFeature(object):
-    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, scopes, num_cues):
+    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, scopes, num_cues, segments=None):
         self.guid = guid
         self.or_sent = or_sent
         self.sents = sents
@@ -63,9 +74,12 @@ class ScopeFeature(object):
         self.cues = cues
         self.scopes = scopes
         self.num_cues = num_cues
+        if segments is not None:
+            self.segments = segments
+
 
 class PipelineScopeFeature(object):
-    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, gold_cues, gold_scopes, gold_num_cues):
+    def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, cue_match, gold_scopes, gold_num_cues):
         self.guid = guid
         self.or_sent = or_sent
         self.sents = sents
@@ -74,11 +88,90 @@ class PipelineScopeFeature(object):
         self.subword_mask = subword_mask
         self.input_len = input_len
         self.cues = cues
-        self.gold_cues = gold_cues
+        self.cue_match = cue_match
         self.gold_scopes = gold_scopes
         self.gold_num_cues = gold_num_cues
 
+
 FeatureLike = Union[CueFeature, ScopeFeature, PipelineScopeFeature]
+bioes_to_id = {'<PAD>': 0, 'I': 1, 'O': 2, 'B': 3, 'E': 4, 'S': 5, 'C': 6}
+
+def scope_to_bioes(scope):
+    tmp = [''] * len(scope)
+    sflag = False
+    for i, e in enumerate(scope):
+        if i > 0 and i < len(scope)-1:
+            if i == 1:
+                if sflag is True and e in [1, 6]:
+                    tmp[i-1] = 'B'
+                    tmp[i] = 'I'
+                    sflag = False
+                elif sflag is True and e not in [1, 6]:
+                    tmp[i-1] = 'S'
+                    tmp[i] = 'O'
+                    sflag = False
+                else:
+                    tmp[i-1] = 'O'
+                    if e in [1, 6]:
+                        sflag = True
+                    else:
+                        tmp[i] = 'O'
+            else:
+                # 1< i < len-1
+                if e in [1, 6] and prev in [1, 6]:
+                    tmp[i] = 'I'
+                    if sflag:
+                        tmp[i-1] = 'B'
+                        sflag = False
+                    sflag = False
+                else:
+                    if e not in [1, 6]:
+                        if prev in [1, 6] and sflag is True:
+                            # prev is last scope token in subscope, start flag False
+                            tmp[i-1] = 'S'
+                            sflag = False
+                        elif prev in [1, 6] and sflag is False:
+                            tmp[i-1] = 'E'
+                        tmp[i] = 'O'
+                    elif e in [1, 6] and prev not in [1, 6]:
+                        # when e != prev there is a change in label sequence
+                        # e is scope token, i is start pos of subscope
+                        sflag = True
+                    elif e == 2:
+                        tmp[i] = 'O'
+            prev = e
+        elif i == 0:
+            prev = e
+            if e == 2:
+                tmp[i] = 'O'
+            else:
+                sflag = True
+        else:
+            # at end of sentence
+            if e in [1, 6]:
+                # when last token is scope, if prev != e: single subscope. 
+                # elif prev == e: extention of subscope to end of sent.
+                # hence append the end pos anyway
+                if prev in [1, 6]:
+                    if sflag:
+                        tmp[i-1] = 'B'
+                    tmp[i] = 'E'
+                else:
+                    # single subscope
+                    tmp[i] = 'S'
+                    tmp[i-1] = 'O'
+            else:
+                tmp[i] = 'O'
+                if prev in [1, 6]:
+                    # prev is end of subscope
+                    if sflag:
+                        tmp[i-1] = 'S'
+                    else:
+                        tmp[i-1] = 'E'
+                else:
+                    tmp[i-1] = 'O'
+    ids = [bioes_to_id[l] for l in tmp]
+    return ids
 
 class Processor(object):
     def __init__(self):
@@ -88,8 +181,8 @@ class Processor(object):
     def read_data(cls, input_file, dataset_name=None) -> RawData:
         return RawData(input_file, dataset_name=dataset_name)
 
-    def create_examples(self, data: RawData, example_type: str, cue_or_scope: str, cached_file=None,
-                        test_size=0.2, val_size=0.1) -> Union[List[ExampleLike], Tuple[List, List, List]]:
+    def create_examples(self, data: RawData, example_type: str, dataset_name: str, cue_or_scope: str, cached_file=None,
+                        test_size=0.15, val_size=0.15) -> Union[List[ExampleLike], Tuple[List, List, List]]:
         """
         Create packed example format for input data. Do train-test split if specified.
 
@@ -105,10 +198,33 @@ class Processor(object):
         """
         assert example_type.lower() in [
             'train', 'test', 'dev', 'split'], 'Wrong example type.'
-        assert cue_or_scope in ['cue', 'scope', 'raw'], 'cue_or_scope: Must specify cue of scope, or raw to perform split and get vocab'
-        
+        assert cue_or_scope in [
+            'cue', 'scope', 'raw'], 'cue_or_scope: Must specify cue of scope, or raw to perform split and get vocab'
+
         cue_examples = []
+        non_cue_examples = []
         scope_examples = []
+        if dataset_name != 'sherlock':
+            with open(param.seg_path[dataset_name], 'rb') as f:
+                seg = _pickle.load(f)
+        else:
+            if param.sherlock_combine_nt:
+                dataset_name += '_com'
+            else:
+                dataset_name += '_sep'
+            with open(param.seg_path[dataset_name]['train'], 'rb') as f:
+                sher_train_seg = _pickle.load(f)
+            with open(param.seg_path[dataset_name]['dev'], 'rb') as f:
+                sher_dev_seg = _pickle.load(f)
+            with open(param.seg_path[dataset_name]['test'], 'rb') as f:
+                sher_test_seg = _pickle.load(f)
+            if example_type == 'train':
+                seg = sher_train_seg
+            elif example_type == 'dev':
+                seg = sher_dev_seg
+            elif example_type == 'test':
+                seg = sher_test_seg
+
         for i, _ in enumerate(data.cues[0]):
             guid = '%s-%d' % (example_type, i)
             sentence = data.cues[0][i]
@@ -116,7 +232,12 @@ class Processor(object):
             cue_sep = data.cues[2][i]
             num_cues = data.cues[3][i]
             sent = ' '.join(sentence)
-            cue_examples.append(CueExample(guid=guid, sent=sent, cues=cues, cue_sep=cue_sep, num_cues=num_cues, subword_mask=None))
+            if num_cues > 0:
+                cue_examples.append(CueExample(guid=guid, sent=sent, cues=cues,
+                                            cue_sep=cue_sep, num_cues=num_cues, subword_mask=None))
+            else:
+                non_cue_examples.append(CueExample(guid=guid, sent=sent, cues=cues,
+                                            cue_sep=cue_sep, num_cues=num_cues, subword_mask=None))
 
         for i, _ in enumerate(data.scopes[0]):
             guid = '%s-%d' % (example_type, i)
@@ -125,7 +246,10 @@ class Processor(object):
             cues = data.scopes[2][i]
             sent = ' '.join(or_sent)
             scopes = data.scopes[3][i]
-            scope_examples.append(ScopeExample(guid=guid, sent=sent, cues=cues, scopes=scopes, sc_sent=sentence, subword_mask=None))
+            segments = seg[i]
+            #segments = [0 for s in scopes[0]]
+            scope_examples.append(ScopeExample(guid=guid, sent=sent, cues=cues,
+                                               scopes=scopes, sc_sent=sentence, subword_mask=None, segments=segments))
 
         if example_type.lower() in ('train', 'test', 'dev'):
             if cue_or_scope.lower() == 'cue':
@@ -140,42 +264,67 @@ class Processor(object):
                 return scope_examples
         elif example_type.lower() == 'split':
             # Note: if set example type to split, will return both cue and scope examples
+            
+            scope_len = len(scope_examples)
+            train_len = math.floor((1 - test_size - val_size) * scope_len)
+            test_len = math.floor(test_size * scope_len)
+            val_len = scope_len - train_len - test_len
+            scope_index = list(range(scope_len))
+            train_index = random.choices(scope_index, k=train_len)
+            test_index = random.choices(scope_index, k=test_len)
+            dev_index = random.choices(scope_index, k=val_len)
+
+            tr_cue = [cue_examples[i] for i in train_index]
+            te_cue = [cue_examples[i] for i in test_index]
+            de_cue = [cue_examples[i] for i in dev_index]
+            tr_scope = [scope_examples[i] for i in train_index]
+            te_scope = [scope_examples[i] for i in test_index]
+            de_scope = [scope_examples[i] for i in dev_index]
+
             random_state = np.random.randint(1, 2020)
-            tr_cue_, te_cue = train_test_split(cue_examples, test_size=test_size, random_state=random_state)
-            tr_scope_, te_scope = train_test_split(scope_examples, test_size=test_size, random_state=random_state)
-            _, te_non_cue_sents = train_test_split(data.non_cue_sents, test_size=test_size, random_state=random_state)
+            tr_nocue_, te_nocue = train_test_split(
+                non_cue_examples, test_size=test_size, random_state=random_state)
+            _, te_non_cue_sents = train_test_split(
+                data.non_cue_sents, test_size=test_size, random_state=random_state)
             random_state2 = np.random.randint(1, 2020)
-            tr_cue, dev_cue = train_test_split(tr_cue_, test_size=(
+            tr_nocue, de_nocue = train_test_split(tr_nocue_, test_size=(
                 val_size / (1 - test_size)), random_state=random_state2)
-            tr_scope, dev_scope = train_test_split(tr_scope_, test_size=(
-                val_size / (1 - test_size)), random_state=random_state2)
-            for i, e in enumerate(tr_cue):
-                e.guid = f'train-{i}'
-            for i, e in enumerate(te_cue):
-                e.guid = f'test-{i}'
-            for i, e in enumerate(dev_cue):
-                e.guid = f'dev-{i}'
-            for i, e in enumerate(tr_scope):
-                e.guid = f'train-{i}'
-            for i, e in enumerate(te_scope):
-                e.guid = f'test-{i}'
-            for i, e in enumerate(dev_scope):
-                e.guid = f'dev-{i}'
+            tr_cue.extend(tr_nocue)
+            de_cue.extend(de_nocue)
+            te_cue.extend(te_nocue)
+            train_cue = copy.deepcopy(tr_cue)
+            test_cue = copy.deepcopy(te_cue)
+            dev_cue = copy.deepcopy(de_cue)
+            train_scope = copy.deepcopy(tr_scope)
+            test_scope = copy.deepcopy(te_scope)
+            dev_scope = copy.deepcopy(de_scope)
+            for c1, e1 in enumerate(train_cue):
+                train_cue[c1].guid = f'train-{c1}'
+            for c2, e2 in enumerate(test_cue):
+                test_cue[c2].guid = f'test-{c2}'
+            for c3, e3 in enumerate(dev_cue):
+                dev_cue[c3].guid = f'dev-{c3}'
+            for c4, e4 in enumerate(train_scope):
+                train_scope[c4].guid = f'train-{c4}'
+            for c5, e5 in enumerate(test_scope):
+                test_scope[c5].guid = f'test-{c5}'
+            for c6, e6 in enumerate(dev_scope):
+                dev_scope[c6].guid = f'dev-{c6}'
             if cached_file is not None:
                 print('Saving examples into cached file %s', cached_file)
-                torch.save(tr_cue, f'train_cue_{cached_file}')
-                torch.save(te_cue, f'test_cue_{cached_file}')
-                torch.save(dev_cue, f'dev_cue_{cached_file}')
-                torch.save(tr_scope, f'train_scope_{cached_file}')
-                torch.save(te_scope, f'test_scope_{cached_file}')
-                torch.save(dev_scope, f'dev_scope_{cached_file}')
-                torch.save(te_non_cue_sents, f'ns_{cached_file}')
+                torch.save(tr_cue, f'split\\train_cue_{cached_file}')
+                torch.save(te_cue, f'split\\test_cue_{cached_file}')
+                torch.save(dev_cue, f'split\\dev_cue_{cached_file}')
+                torch.save(tr_scope, f'split\\train_scope_{cached_file}')
+                torch.save(te_scope, f'split\\test_scope_{cached_file}')
+                torch.save(dev_scope, f'split\\dev_scope_{cached_file}')
+                torch.save(te_non_cue_sents, f'split\\ns_{cached_file}')
             return (tr_cue, dev_cue, te_cue), (tr_scope, dev_scope, te_scope)
-    
+
     def load_examples(self, file: str):
         """
         Load a pre-saved example binary file. Or anything else.
-        
+
         Warning: torch.load() uses pickle module implicitly, which is known to be insecure. 
         It is possible to construct malicious pickle data which will execute arbitrary code during unpickling.
         Never load data that could have come from an untrusted source, or that could have been tampered with.
@@ -184,7 +333,7 @@ class Processor(object):
         return torch.load(file)
 
     def create_features(self, data: List[ExampleLike], cue_or_scope: str,
-                        max_seq_len: int=128, is_bert=False) -> List[Union[CueFeature, ScopeFeature]]:
+                        max_seq_len: int = 128, is_bert=False) -> List[Union[CueFeature, ScopeFeature]]:
         """
         Create packed 
         """
@@ -208,6 +357,9 @@ class Processor(object):
                             if i > 0:
                                 mask = 0
                             subword_mask.append(mask)
+                            if param.ignore_multiword_cue:
+                                if cue == 2:
+                                    cue = 1
                             new_cues.append(cue)
                             new_cuesep.append(sep)
                             new_text.append(subword)
@@ -227,23 +379,16 @@ class Processor(object):
                     input_ids = self.tokenizer.convert_tokens_to_ids(new_text)
                     padding_mask = [1] * len(input_ids)
                     input_len = len(input_ids)
-                    while len(input_ids) < max_seq_len:
-                        input_ids.append(0)
-                        padding_mask.append(0)
-                        subword_mask.append(0)
-                        new_cues.append(3)
-                        new_cuesep.append(0)
-                    assert len(input_ids) == max_seq_len
-                    assert len(padding_mask) == max_seq_len
-                    assert len(subword_mask) == max_seq_len
-                    assert len(new_cues) == max_seq_len
-                    assert len(new_cuesep) == max_seq_len
-                    feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids, 
+                    feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids,
                                          padding_mask=padding_mask, subword_mask=subword_mask,
                                          input_len=input_len, cues=new_cues, cue_sep=new_cuesep, num_cues=num_cues)
                 else:
                     # For non-BERT (non-BPE tokenization)
                     cues = example.cues
+                    if param.ignore_multiword_cue:
+                        for i, c in enumerate(cues):
+                            if c == 2:
+                                cues[i] = 1
                     cues.insert(0, 3)
                     cues.append(3)
                     cue_sep = example.cue_sep
@@ -255,18 +400,13 @@ class Processor(object):
                     input_ids = self.tokenizer.convert_tokens_to_ids(words)
                     padding_mask = [1] * len(input_ids)
                     input_len = len(input_ids)
-                    while len(input_ids) < max_seq_len:
-                        input_ids.append(0)
-                        padding_mask.append(0)
-                        cues.append(3)
-                        cue_sep.append(0)
-                    feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids, 
+                    feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids,
                                          padding_mask=padding_mask, subword_mask=None,
                                          input_len=input_len, cues=cues, cue_sep=cue_sep, num_cues=num_cues)
                 features.append(feature)
         else:
             # For scope
-            for example in data:
+            for i, example in enumerate(data):
                 guid = example.guid
                 wrap_input_id = []
                 wrap_subword_mask = []
@@ -275,18 +415,21 @@ class Processor(object):
                 wrap_scopes = []
                 wrap_padding_mask = []
                 wrap_input_len = []
-
+                wrap_segs = []
+                segments = example.segments
                 for c in range(example.num_cues):
                     sent = example.sc_sent[c]
                     cues = example.cues[c]
                     scopes = example.scopes[c]
+
                     if is_bert:
                         # For BERT model
                         temp_sent = []
                         temp_scope = []
                         temp_cues = []
                         temp_mask = []
-                        for word, cue, scope in zip(sent, cues, scopes):
+                        temp_seg = []
+                        for word, cue, scope, seg in zip(sent, cues, scopes, segments):
                             if '<AFF>' not in word:
                                 # Deal with affix cue. (manually)
                                 subwords = self.tokenizer.tokenize(word)
@@ -295,9 +438,13 @@ class Processor(object):
                                     if count > 0:
                                         mask = 0
                                     temp_mask.append(mask)
+                                    if param.ignore_multiword_cue:
+                                        if cue == 2:
+                                            cue = 1
                                     temp_cues.append(cue)
                                     temp_scope.append(scope)
                                     temp_sent.append(subword)
+                                    temp_seg.append(seg)
                             else:
                                 word = word[5:]
                                 subwords = self.tokenizer.tokenize(word)
@@ -308,6 +455,7 @@ class Processor(object):
                                     temp_mask.append(mask)
                                     temp_cues.append(cue)
                                     temp_scope.append(scope)
+                                    temp_seg.append(seg)
                                     if count != 0:
                                         temp_sent.append(subword)
                                     else:
@@ -316,11 +464,12 @@ class Processor(object):
                         new_cues = []
                         new_scopes = []
                         new_masks = []
+                        new_seg = []
                         pos = 0
                         prev = 3
-                        for token, cue, label, mask in zip(temp_sent, temp_cues,
-                                                           temp_scope, temp_mask):
-                            # Process the cue augmentation. 
+                        for token, cue, label, mask, seg in zip(temp_sent, temp_cues,
+                                                                temp_scope, temp_mask, temp_seg):
+                            # Process the cue augmentation.
                             # Different from the original repo, the strategy is indicate the cue border
                             if cue != 3:
                                 if pos != 0 and pos != len(sent)-1:
@@ -330,36 +479,43 @@ class Processor(object):
                                         new_text.append(token)
                                         new_scopes.append(label)
                                         new_cues.append(cue)
+                                        new_seg.append(seg)
                                     else:
                                         # left bound
                                         new_text.append(f'[unused{cue+1}]')
                                         new_cues.append(cue)
                                         new_masks.append(1)
                                         new_scopes.append(label)
+                                        new_seg.append(seg)
                                         new_text.append(token)
                                         new_masks.append(0)
                                         new_scopes.append(label)
                                         new_cues.append(cue)
+                                        new_seg.append(seg)
                                 elif pos == 0:
                                     # at pos 0
                                     new_text.append(f'[unused{cue+1}]')
                                     new_masks.append(1)
                                     new_scopes.append(label)
                                     new_cues.append(cue)
+                                    new_seg.append(seg)
                                     new_text.append(token)
                                     new_masks.append(0)
                                     new_scopes.append(label)
                                     new_cues.append(cue)
+                                    new_seg.append(seg)
                                 else:
                                     # at eos
                                     new_text.append(token)
                                     new_masks.append(mask)
                                     new_scopes.append(label)
                                     new_cues.append(cue)
+                                    new_seg.append(seg)
                                     new_text.append(f'[unused{cue+1}]')
                                     new_masks.append(0)
-                                    new_scopes.append(label)                            
+                                    new_scopes.append(label)
                                     new_cues.append(cue)
+                                    new_seg.append(seg)
                                     """
                                     if cue != 3:
                                         if first_part == 0:
@@ -384,24 +540,28 @@ class Processor(object):
                                     new_masks.append(mask)
                                     new_scopes.append(label)
                                     new_cues.append(cue)
+                                    new_seg.append(seg)
                                 else:
                                     # current non cue, insert right bound before current pos
                                     new_text.append(f'[unused{prev+1}]')
                                     new_masks.append(0)
-                                    new_scopes.append(0)
+                                    new_scopes.append(2)
                                     new_cues.append(prev)
+                                    new_seg.append(seg)
                                     new_text.append(token)
                                     new_masks.append(mask)
                                     new_scopes.append(label)
                                     new_cues.append(cue)
+                                    new_seg.append(seg)
                             prev = cue
                             pos += 1
-                        
-                        
+
                         if len(new_text) >= max_seq_len - 1:
                             new_text = new_text[0:(max_seq_len - 2)]
                             new_cues = new_cues[0:(max_seq_len - 2)]
                             new_masks = new_masks[0:(max_seq_len - 2)]
+                            new_scopes = new_scopes[0:(max_seq_len - 2)]
+                            new_seg = new_seg[0:(max_seq_len - 2)]
                         new_text.insert(0, '[CLS]')
                         new_text.append('[SEP]')
                         new_masks.insert(0, 1)
@@ -410,15 +570,12 @@ class Processor(object):
                         new_cues.append(3)
                         new_scopes.insert(0, 2)
                         new_scopes.append(2)
-                        input_ids = self.tokenizer.convert_tokens_to_ids(new_text)
+                        new_seg.insert(0, 0)
+                        new_seg.append(new_seg[-1])
+                        input_ids = self.tokenizer.convert_tokens_to_ids(
+                            new_text)
                         padding_mask = [1] * len(input_ids)
                         input_len = len(input_ids)
-                        while len(input_ids) < max_seq_len:
-                            input_ids.append(0)
-                            padding_mask.append(0)
-                            new_masks.append(0)
-                            new_cues.append(3)
-                            new_scopes.append(0)
                         wrap_sents.append(new_text)
                         wrap_input_id.append(input_ids)
                         wrap_subword_mask.append(new_masks)
@@ -426,12 +583,20 @@ class Processor(object):
                         wrap_scopes.append(new_scopes)
                         wrap_padding_mask.append(padding_mask)
                         wrap_input_len.append(input_len)
+                        wrap_segs.append(new_seg)
                     else:
                         # For non-BERT (non-BPE tokenization)
-                        sent = example.sc_sent[c]
-                        cues = example.cues[c]
-                        scopes = example.scopes[c]
-                        
+                        sent = example.sc_sent[c].copy()
+                        cues = example.cues[c].copy()
+                        if param.ignore_multiword_cue:
+                            for i, c in enumerate(cues):
+                                if c == 2:
+                                    cues[i] = 1
+                        scopes = example.scopes[c].copy()
+                        seg = segments.copy()
+                        if len(seg) >= max_seq_len - 1:
+                            seg = seg[0:(max_seq_len - 2)]
+
                         words = self.tokenizer.tokenize(sent)
                         for i, w in enumerate(words):
                             if '<AFF>' in w:
@@ -446,13 +611,11 @@ class Processor(object):
                         cues.append(3)
                         scopes.insert(0, 2)
                         scopes.append(2)
+                        seg.insert(0, 0)
+                        seg.append(seg[-1])
                         input_ids = self.tokenizer.convert_tokens_to_ids(words)
                         padding_mask = [1] * len(input_ids)
                         input_len = len(input_ids)
-                        while len(input_ids) < max_seq_len:
-                            input_ids.append(0)
-                            padding_mask.append(0)
-                            cues.append(3)
                         wrap_sents.append(words)
                         wrap_input_id.append(input_ids)
                         wrap_subword_mask = None
@@ -460,15 +623,18 @@ class Processor(object):
                         wrap_scopes.append(scopes)
                         wrap_padding_mask.append(padding_mask)
                         wrap_input_len.append(input_len)
-                    
-                    feature = ScopeFeature(guid=guid, or_sent=example.sent, sents=wrap_sents, input_ids=wrap_input_id, 
+                        wrap_segs.append(seg)
+                        #seq_len = map(len, [words,cues,scopes,seg])
+                        #assert all(each_len == len(words) for each_len in seq_len)
+
+                    feature = ScopeFeature(guid=guid, or_sent=example.sent, sents=wrap_sents, input_ids=wrap_input_id,
                                            padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
-                                           input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes, num_cues=example.num_cues)
+                                           input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes, num_cues=example.num_cues, segments=wrap_segs)
                 features.append(feature)
         return features
 
-    def create_features_pipeline(self, data: List[ScopeFeature], cue_model, non_cue_examples,
-                        max_seq_len: int, is_bert=False):
+    def create_features_pipeline(self, cue_input: List[CueFeature], scope_input: List[ScopeFeature], cue_model, 
+                                 max_seq_len: int, is_bert=False, non_cue_examples=None):
         """
         Create scope feature for pipeline TESTING. The cue info was predicted with a trained cue 
         model, instead of the golden cues. Training of scope model will be normal scope model, with golden cue input.
@@ -477,54 +643,90 @@ class Processor(object):
         """
         assert self.tokenizer is not None, 'Execute self.get_tokenizer() first to get the corresponding tokenizer.'
         features = []
-        for example in data:
+        for counter, cue_ex in enumerate(cue_input):
             wrap_sents = []
             wrap_input_id = []
             wrap_subword_mask = []
             wrap_cues = []
             wrap_padding_mask = []
             wrap_input_len = []
-            sent = example.sent
+            sent = cue_ex.sent
             tmp_mask = []
+            gold_nc = np.max(cue_ex.cue_sep)
             if is_bert:
                 tmp_text = []
-                for word in sent.split(' '):
+                tmp_cue = []
+                tmp_sep = []
+                sent_list = sent.split(' ')
+                for word, cue, sep in zip(sent_list, cue_ex.cues, cue_ex.cue_sep):
                     subwords = self.tokenizer.tokenize(word)
                     for i, subword in enumerate(subwords):
                         mask = 1
                         if i > 0:
                             mask = 0
                         tmp_mask.append(mask)
+                        tmp_cue.append(cue)
                         tmp_text.append(subword)
-                    if len(tmp_text) >= max_seq_len - 1:
-                        tmp_text = tmp_text[0:(max_seq_len - 2)]
-                        tmp_mask = tmp_mask[0:(max_seq_len - 2)]
+                        tmp_sep.append(sep)
+                if len(tmp_text) >= max_seq_len - 1:
+                    tmp_text = tmp_text[0:(max_seq_len - 2)]
+                    tmp_mask = tmp_mask[0:(max_seq_len - 2)]
+                    tmp_cue = tmp_cue[0:(max_seq_len - 2)]
+                    tmp_sep = tmp_sep[0:(max_seq_len - 2)]
                 tmp_text.insert(0, '[CLS]')
                 tmp_text.append('[SEP]')
                 tmp_mask.insert(0, 1)
                 tmp_mask.append(1)
+                tmp_cue.insert(0, 3)
+                tmp_cue.append(3)
+                tmp_sep.insert(0, 0)
+                tmp_sep.append(0)
                 tmp_input_ids = self.tokenizer.convert_tokens_to_ids(tmp_text)
 
                 tmp_pad_mask = [1] * len(tmp_input_ids)
                 tmp_input_lens = len(tmp_input_ids)
+                tmp_pad_mask_in = tmp_pad_mask.copy()
                 while len(tmp_input_ids) < max_seq_len:
                     tmp_input_ids.append(0)
-                    tmp_pad_mask.append(0)
+                    tmp_pad_mask_in.append(0)
                     tmp_mask.append(0)
-
-                cue_logits, cue_sep_logits = cue_model(tmp_input_ids, attention_mask=tmp_pad_mask)
-                pred_cues = torch.argmax(cue_logits, dim=-1)
-                pred_cue_sep = torch.argmax(cue_sep_logits, dim=-1)
-                # e.g. 
+                    tmp_cue.append(0)
+                    tmp_sep.append(0)
+                tmp_input_ids = torch.LongTensor(tmp_input_ids).unsqueeze(0).cuda()
+                tmp_pad_mask_in = torch.LongTensor(tmp_pad_mask_in).unsqueeze(0).cuda()
+                cue_logits, cue_sep_logits = cue_model(
+                    tmp_input_ids, attention_mask=tmp_pad_mask_in)
+                pred_cues = torch.argmax(cue_logits, dim=-1).squeeze()
+                pred_cue_sep = torch.argmax(cue_sep_logits, dim=-1).squeeze()
+                # e.g.
                 # pred_cue:     [3, 3, 3, 3, 1, 3, 3, 3, 1, 3, 3]
                 # pred_cue_sep: [0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0]
-                _ = pred_cue_sep.copy()
-                num_cues = _.sort()[-1]
+                nu = pred_cue_sep.clone()
+                num_cues = nu.max().item()
                 sep_cues = [[3] * tmp_input_lens for c in range(num_cues)]
                 for c in range(num_cues):
-                    for i, e in enumerate(pred_cue_sep):
-                        if c == e:
-                            sep_cues[c][i] = pred_cues[i]
+                    for i, e in enumerate(tmp_pad_mask):
+                        if e == 1:
+                            if pred_cue_sep[i].item() == c+1:
+                                sep_cues[c][i] = pred_cues[i].item()
+                
+                gold_sep_cues = [[3] * tmp_input_lens for c in range(gold_nc)]
+                for gc in range(gold_nc):
+                    for i, e in enumerate(tmp_pad_mask):
+                        if e == 1:
+                            if tmp_sep[i] == gc+1:
+                                gold_sep_cues[gc][i] = tmp_cue[i]
+                nc = max(num_cues, gold_nc)
+                cue_match = [-1 for c in range(nc)]
+                for pc in range(num_cues):
+                    pred_cue_pos = [index for index, v in enumerate(sep_cues[pc]) if v == 1 or v == 0]
+                    for gc in range(gold_nc):
+                        gold_cue_pos = [index for index, v in enumerate(gold_sep_cues[gc]) if v == 1 or v == 0]
+                        match = bool(set(pred_cue_pos) & set(gold_cue_pos))
+                        print()
+                        if match:
+                            cue_match[pc] = gc
+
 
                 for c in range(num_cues):
                     new_text = []
@@ -533,7 +735,7 @@ class Processor(object):
                     pos = 0
                     prev = 3
                     for token, cue, mask in zip(tmp_text, sep_cues[c], tmp_mask):
-                        # Process the cue augmentation. 
+                        # Process the cue augmentation.
                         # Different from the original repo, the strategy is indicate the cue border
                         if cue != 3:
                             if pos != 0 and pos != len(sent)-1:
@@ -564,26 +766,8 @@ class Processor(object):
                                 new_masks.append(mask)
                                 new_cues.append(cue)
                                 new_text.append(f'[unused{cue+1}]')
-                                new_masks.append(0)                     
+                                new_masks.append(0)
                                 new_cues.append(cue)
-                                """
-                                if cue != 3:
-                                    if first_part == 0:
-                                        first_part = 1
-                                        new_text.append(f'[unused{cue+1}]')
-                                        new_masks.append(1)
-                                        new_scopes.append(label)
-                                        new_text.append(token)
-                                        new_masks.append(0)
-                                        new_scopes.append(label)
-                                        continue
-                                    if cue != 0:
-                                        # only set the unused token when subword is not part of affix cue
-                                        # when affix, set all following subword as non cue
-                                        new_text.append(f'[unused{cue+1}]')
-                                        new_masks.append(0)
-                                        new_scopes.append(label)
-                                """
                         else:
                             if cue == prev:
                                 new_text.append(token)
@@ -606,7 +790,7 @@ class Processor(object):
                         input_id.append(0)
                         padding_mask.append(0)
                         new_masks.append(0)
-                        new_cues.append(3)
+                        new_cues.append(0)
                     assert len(input_id) == max_seq_len
                     assert len(padding_mask) == max_seq_len
                     assert len(new_masks) == max_seq_len
@@ -617,50 +801,21 @@ class Processor(object):
                     wrap_cues.append(new_cues)
                     wrap_padding_mask.append(padding_mask)
                     wrap_input_len.append(input_len)
-            else:
-                # Non-BERT
-                tmp_text = self.tokenizer.tokenize(sent)
-                tmp_text.insert(0, '[CLS]')
-                tmp_text.append('[SEP]')
-                tmp_input_ids = self.tokenizer.convert_tokens_to_ids(tmp_text)
-                cue_logits, cue_sep_logits = cue_model(tmp_input_ids)
-                pred_cues = torch.argmax(cue_logits, dim=-1)
-                pred_cue_sep = torch.argmax(cue_sep_logits, dim=-1)
-                # e.g. 
-                # pred_cue:     [3, 3, 3, 3, 1, 3, 3, 3, 1, 3, 3]
-                # pred_cue_sep: [0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0]
-                _ = pred_cue_sep.copy()
-                num_cues = _.sort()[-1]
-                sep_cues = [[3] * tmp_input_lens for c in range(num_cues)]
-                for c in range(num_cues):
-                    for i, e in enumerate(pred_cue_sep):
-                        if c == e:
-                            sep_cues[c][i] = pred_cues[i]
-                
-                for c in range(num_cues):
-                    padding_mask = [1] * len(tmp_input_ids)
-                    input_len = len(tmp_input_ids)
-                    while len(tmp_input_ids) < max_seq_len:
-                        tmp_input_ids.append(0)
-                        padding_mask.append(0)
-                        sep_cues[c].append(3)
-                    wrap_sents.append(tmp_text)
-                    wrap_input_id.append(tmp_input_ids)
-                    wrap_subword_mask.append(None)
-                    wrap_cues.append(sep_cues[c])
-                    wrap_padding_mask.append(padding_mask)
-                    wrap_input_len.append(input_len)
 
-            gold_cues = example.cues
-            gold_scopes = example.scopes
-                
-            feature = PipelineScopeFeature(guid=example.guid, or_sent=example.sent, sents=wrap_sents, input_ids=wrap_input_id, 
-                                    padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
-                                    input_len=wrap_input_len, cues=wrap_cues, gold_cues=gold_cues, gold_scopes=gold_scopes, gold_num_cues=example.num_cues)
+            if counter < len(scope_input):
+                gold_scopes = scope_input[counter].scopes
+                gold_num_cue = gold_nc
+            else:
+                gold_num_cue = gold_nc
+                gold_scopes = [2 for i in sent_list]
+
+            feature = PipelineScopeFeature(guid=cue_ex.guid, or_sent=cue_ex.sent, sents=wrap_sents, input_ids=wrap_input_id,
+                                           padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
+                                           input_len=wrap_input_len, cues=wrap_cues, cue_match=cue_match, gold_scopes=gold_scopes, gold_num_cues=gold_num_cue)
             features.append(feature)
         return features
-    
-    def create_dataset(self, features: List[FeatureLike], cue_or_scope: str, example_type: str, 
+
+    def create_dataset(self, features: List[FeatureLike], cue_or_scope: str, example_type: str,
                        is_sorted=False, is_bert=False) -> Union[Dataset, TensorDataset]:
         """
         Pack the features to dataset. If cue_or_scope is cue or scope, 
@@ -680,63 +835,225 @@ class Processor(object):
                 TensorDataset(input_ids, padding_mask, cues, cue_sep, input_len, subword_mask)
             cue_or_scope == scope:
         """
-        
+
         if is_sorted:
             print('sorted data by th length of input')
-            features = sorted(features, key=lambda x: x.input_len, reverse=True)
+            features = sorted(
+                features, key=lambda x: x.input_len, reverse=True)
         if cue_or_scope.lower() == 'cue':
-            input_ids = []
-            padding_mask = []
-            subword_mask = []
-            cues = []
-            cue_sep = []
-            input_len = []
-            for feature in features:
-                input_ids.append(feature.input_ids)
-                padding_mask.append(feature.padding_mask)
-                subword_mask.append(feature.subword_mask)
-                cues.append(feature.cues)
-                cue_sep.append(feature.cue_sep)
-                input_len.append(feature.input_len)
-            
-            input_ids = torch.LongTensor(input_ids)
-            padding_mask = torch.LongTensor(padding_mask)
-            cues = torch.LongTensor(cues)
-            cue_sep = torch.LongTensor(cue_sep)
-            input_len = torch.LongTensor(input_len)
-            subword_mask = torch.LongTensor(subword_mask)
-            return TensorDataset(input_ids, padding_mask, cues, cue_sep, input_len, subword_mask)
+            if is_bert:
+                input_ids = []
+                padding_mask = []
+                subword_mask = []
+                cues = []
+                cue_sep = []
+                input_len = []
+                for feature in features:
+                    input_ids.append(feature.input_ids)
+                    padding_mask.append(feature.padding_mask)
+                    subword_mask.append(feature.subword_mask)
+                    cues.append(feature.cues)
+                    cue_sep.append(feature.cue_sep)
+                    input_len.append(feature.input_len)
+
+                input_ids = pad_sequences(input_ids,
+                                          maxlen=param.max_len, value=0, padding="post",
+                                          dtype="long", truncating="post").tolist()
+                padding_mask = pad_sequences(padding_mask,
+                                             maxlen=param.max_len, value=0, padding="post",
+                                             dtype="long", truncating="post").tolist()
+                cues = pad_sequences(cues,
+                                     maxlen=param.max_len, value=3, padding="post",
+                                     dtype="long", truncating="post").tolist()
+                cue_sep = pad_sequences(cue_sep,
+                                        maxlen=param.max_len, value=0, padding="post",
+                                        dtype="long", truncating="post").tolist()
+                subword_mask = pad_sequences(subword_mask,
+                                             maxlen=param.max_len, value=0, padding="post",
+                                             dtype="long", truncating="post").tolist()
+
+                input_ids = torch.LongTensor(input_ids)
+                padding_mask = torch.LongTensor(padding_mask)
+                cues = torch.LongTensor(cues)
+                cue_sep = torch.LongTensor(cue_sep)
+                input_len = torch.LongTensor(input_len)
+                subword_mask = torch.LongTensor(subword_mask)
+                return TensorDataset(input_ids, padding_mask, cues, cue_sep, input_len, subword_mask)
+            else:
+                input_ids = []
+                padding_mask = []
+                cues = []
+                cue_sep = []
+                input_len = []
+                for feature in features:
+                    input_ids.append(feature.input_ids)
+                    padding_mask.append(feature.padding_mask)
+                    cues.append(feature.cues)
+                    cue_sep.append(feature.cue_sep)
+                    input_len.append(feature.input_len)
+
+                input_ids = pad_sequences(input_ids,
+                                          maxlen=param.max_len, value=0, padding="post",
+                                          dtype="long", truncating="post").tolist()
+                padding_mask = pad_sequences(padding_mask,
+                                             maxlen=param.max_len, value=0, padding="post",
+                                             dtype="long", truncating="post").tolist()
+                cues = pad_sequences(cues,
+                                     maxlen=param.max_len, value=3, padding="post",
+                                     dtype="long", truncating="post").tolist()
+                cue_sep = pad_sequences(cue_sep,
+                                        maxlen=param.max_len, value=0, padding="post",
+                                        dtype="long", truncating="post").tolist()
+
+                input_ids = torch.LongTensor(input_ids)
+                padding_mask = torch.LongTensor(padding_mask)
+                cues = torch.LongTensor(cues)
+                cue_sep = torch.LongTensor(cue_sep)
+                input_len = torch.LongTensor(input_len)
+                subword_masks = torch.zeros_like(input_ids)
+                return TensorDataset(input_ids, padding_mask, cues, cue_sep, input_len, subword_mask)
         elif cue_or_scope.lower() == 'scope':
-            input_ids = []
-            padding_mask = []
-            subword_mask = []
-            scopes = []
-            input_len = []
-            for feature in features:
-                for cue_i in range(feature.num_cues):
-                    input_ids.append(feature.input_ids[cue_i])
-                    padding_mask.append(feature.padding_mask[cue_i])
-                    scopes.append(feature.scopes[cue_i])
-                    subword_mask.append(feature.subword_mask[cue_i])
-                    input_len.append(feature.input_len[cue_i])
-            
-            input_ids = torch.LongTensor(input_ids)
-            padding_mask = torch.LongTensor(padding_mask)
-            scopes = torch.LongTensor(scopes)
-            input_len = torch.LongTensor(input_len)
-            subword_mask = torch.LongTensor(subword_mask)
-            return TensorDataset(input_ids, padding_mask, scopes, input_len, subword_mask)
+            if is_bert:
+                input_ids = []
+                padding_mask = []
+                subword_mask = []
+                scopes = []
+                input_len = []
+                segments = []
+                cues = []
+                for feature in features:
+                    for cue_i in range(feature.num_cues):
+                        input_ids.append(feature.input_ids[cue_i])
+                        padding_mask.append(feature.padding_mask[cue_i])
+                        scopes.append(feature.scopes[cue_i])
+                        subword_mask.append(feature.subword_mask[cue_i])
+                        input_len.append(feature.input_len[cue_i])
+                        segments.append(feature.segments[cue_i])
+                        cues.append(feature.cues[cue_i])
+
+                input_ids = pad_sequences(input_ids,
+                                          maxlen=param.max_len, value=0, padding="post",
+                                          dtype="long", truncating="post").tolist()
+                padding_mask = pad_sequences(padding_mask,
+                                             maxlen=param.max_len, value=0, padding="post",
+                                             dtype="long", truncating="post").tolist()
+                scopes = pad_sequences(scopes,
+                                       maxlen=param.max_len, value=0, padding="post",
+                                       dtype="long", truncating="post").tolist()
+                segments = pad_sequences(segments,
+                                         maxlen=param.max_len, value=0, padding="post",
+                                         dtype="long", truncating="post").tolist()
+                cues = pad_sequences(cues,
+                                     maxlen=param.max_len, value=0, padding="post",
+                                     dtype="long", truncating="post").tolist()
+                subword_mask = pad_sequences(subword_mask,
+                                             maxlen=param.max_len, value=0, padding="post",
+                                             dtype="long", truncating="post").tolist()
+
+                input_ids = torch.LongTensor(input_ids)
+                padding_mask = torch.LongTensor(padding_mask)
+                scopes = torch.LongTensor(scopes)
+                input_len = torch.LongTensor(input_len)
+                cues = torch.LongTensor(cues)
+                segments = torch.LongTensor(segments)
+                subword_mask = torch.LongTensor(subword_mask)
+                return TensorDataset(input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask)
+            else:
+                input_ids = []
+                padding_mask = []
+                scopes = []
+                input_len = []
+                segments = []
+                cues = []
+                for feature in features:
+                    for cue_i in range(feature.num_cues):
+                        input_ids.append(feature.input_ids[cue_i])
+                        padding_mask.append(feature.padding_mask[cue_i])
+                        scopes.append(feature.scopes[cue_i])
+                        input_len.append(feature.input_len[cue_i])
+                        segments.append(feature.segments[cue_i])
+                        cues.append(feature.cues[cue_i])
+                input_ids = pad_sequences(input_ids,
+                                          maxlen=param.max_len, value=0, padding="post",
+                                          dtype="long", truncating="post").tolist()
+                padding_mask = pad_sequences(padding_mask,
+                                             maxlen=param.max_len, value=0, padding="post",
+                                             dtype="long", truncating="post").tolist()
+                scopes = pad_sequences(scopes,
+                                       maxlen=param.max_len, value=0, padding="post",
+                                       dtype="long", truncating="post").tolist()
+                segments = pad_sequences(segments,
+                                         maxlen=param.max_len, value=0, padding="post",
+                                         dtype="long", truncating="post").tolist()
+                cues = pad_sequences(cues,
+                                     maxlen=param.max_len, value=0, padding="post",
+                                     dtype="long", truncating="post").tolist()
+                input_ids = torch.LongTensor(input_ids)
+                padding_mask = torch.LongTensor(padding_mask)
+                scopes = torch.LongTensor(scopes)
+                input_len = torch.LongTensor(input_len)
+                segments = torch.LongTensor(segments)
+                cues = torch.LongTensor(cues)
+                subword_masks = torch.zeros_like(input_ids)
+                return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks)
         elif cue_or_scope.lower() == 'pipeline' and example_type.lower() == 'test':
             return Dataset(features)
         else:
             raise ValueError(cue_or_scope, example_type)
     
-    def get_tokenizer(self, data: Tuple[InputExample], is_bert=False, do_lower_case=False, bert_path=None, non_cue_sents: List[str]=None):
+    def create_pipeline_ds(self, feats: List[PipelineScopeFeature]):
+        weak = []
+        strict = []
+
+
+    def ex_to_bioes(self, data: List[ScopeExample]):
+        new_features = data
+        for f_count, feat in enumerate(new_features):
+            for c_count in range(feat.num_cues):
+                cues = feat.cues[c_count]
+                scopes = feat.scopes[c_count]
+                temp_scope = []
+                for i, e in enumerate(scopes):
+                    if e == 2:
+                        if cues[i] != 3:
+                            temp_scope.append(6)
+                        else:
+                            temp_scope.append(e)
+                    else:
+                        temp_scope.append(e)
+                if len(scopes) != 1:
+                    scope_bioes = scope_to_bioes(temp_scope)
+                else:
+                    scope_bioes = scopes
+                new_features[f_count].scopes[c_count] = scope_bioes
+        return new_features
+
+    def scope_add_cue(self, data: List[ScopeExample]):
+        new_features = data
+        for f_count, feat in enumerate(new_features):
+            for c_count in range(feat.num_cues):
+                cues = feat.cues[c_count]
+                scopes = feat.scopes[c_count]
+                temp_scope = []
+                for i, e in enumerate(scopes):
+                    if cues[i] != 3:
+                        temp_scope.append(3)
+                    else:
+                        temp_scope.append(e)
+                new_features[f_count].scopes[c_count] = temp_scope
+        return new_features
+                
+
+    def get_tokenizer(self, data: Tuple[InputExample], is_bert=False, do_lower_case=False, bert_path=None, non_cue_sents: List[str] = None, noembed=False):
         if is_bert:
             self.tokenizer = BertTokenizer.from_pretrained(
                 pretrained_model_name_or_path=param.bert_path, do_lower_case=do_lower_case, cache_dir='bert_tokenizer')
         else:
-            self.tokenizer = OtherTokenizer(data, external_vocab=False, non_cue_sents=non_cue_sents)
+            if noembed:
+                self.tokenizer = NaiveTokenizer(data)
+            else:
+                self.tokenizer = OtherTokenizer(
+                    data, external_vocab=False, non_cue_sents=non_cue_sents)
 
 
 class Dictionary(object):
@@ -753,30 +1070,35 @@ class Dictionary(object):
     def __len__(self):
         return len(self.id2token)
 
+
 class NaiveTokenizer(object):
-    def __init__(self, data: Tuple[InputExample], non_cue_sents: List[str]=None):
+    def __init__(self, data: Tuple[InputExample], non_cue_sents: List[str] = None):
         self.dictionary = Dictionary()
         self.data = data
         self.dictionary.add_word('<PAD>')
         for s in self.data:
-            for word in s.sent:
-                self.dictionary.add_word(word)
+            if isinstance(s.sent, str):
+                split_sent = s.sent.split(' ')
+                for word in split_sent:
+                    self.dictionary.add_word(word)
+            else:
+                for word in s.sent:
+                    self.dictionary.add_word(word)
         if non_cue_sents is not None:
             for sent in non_cue_sents:
                 for word in sent:
-                    self.dictionary.add_word(word) 
+                    self.dictionary.add_word(word)
         self.dictionary.add_word('<OOV>')
         self.dictionary.add_word('[CLS]')
         self.dictionary.add_word('[SEP]')
-        
-        
+
     def tokenize(self, text: Union[str, List]):
         if isinstance(text, list):
             return text
         elif isinstance(text, str):
             words = text.split()
             return words
-    
+
     def convert_tokens_to_ids(self, tokens: Iterable):
         if isinstance(tokens, list):
             ids = []
@@ -796,6 +1118,7 @@ class NaiveTokenizer(object):
         token_list = [self.dictionary.id2token[tid] for tid in ids]
         return " ".join(token_list)
 
+
 class OtherTokenizer(NaiveTokenizer):
     def __init__(self, data, emb=param.embedding, external_vocab=False, non_cue_sents=None):
         super(OtherTokenizer, self).__init__(data, non_cue_sents)
@@ -804,24 +1127,26 @@ class OtherTokenizer(NaiveTokenizer):
                 vocab = _pickle.load(f)
             for i, (k, v) in enumerate(vocab.items()):
                 self.dictionary.add_word(k)
-        self.vector = gensim.models.KeyedVectors.load_word2vec_format(param.emb_cache, binary=True)
-        self.embedding = np.random.uniform(-np.sqrt(0.06), np.sqrt(0.06), 
+        self.vector = gensim.models.KeyedVectors.load_word2vec_format(
+            param.emb_cache, binary=True)
+        self.embedding = np.random.uniform(-np.sqrt(0.06), np.sqrt(0.06),
                                            (len(self.dictionary.token2id), param.word_emb_dim))
         for w in self.dictionary.token2id:
             if w in self.vector:
                 self.embedding[self.dictionary.token2id[w]] = self.vector[w]
             elif w.lower() in self.vector:
-                self.embedding[self.dictionary.token2id[w]] = self.vector[w.lower()]
+                self.embedding[self.dictionary.token2id[w]
+                               ] = self.vector[w.lower()]
+        del self.vector
+        gc.collect()
 
 
 if __name__ == "__main__":
     proc = Processor()
-    if param.split_and_save:
-        sfu_data = proc.read_data(param.data_path['sfu'], 'sfu')
-        proc.create_examples(sfu_data, 'split', 'cue', 'sfu.pt')
-        bio_a_data = proc.read_data(
-            param.data_path['bioscope_abstracts'], 'bioscope')
-        proc.create_examples(bio_a_data, 'split', 'cue', 'bioA.pt')
-        bio_f_data = proc.read_data(param.data_path['bioscope_full'], 'bioscope')
-        proc.create_examples(bio_f_data, 'split', 'cue', 'bioF.pt')
-    print()
+    sfu_data = proc.read_data(param.data_path['sfu'], 'sfu')
+    proc.create_examples(sfu_data, 'split', 'sfu', 'cue', 'sfu.pt')
+    bio_a_data = proc.read_data(
+        param.data_path['bioscope_abstracts'], 'bioscope')
+    proc.create_examples(bio_a_data, 'split', 'bioscope_a', 'cue', 'bioA.pt')
+    bio_f_data = proc.read_data(param.data_path['bioscope_full'], 'bioscope')
+    proc.create_examples(bio_f_data, 'split', 'bioscope_f', 'cue', 'bioF.pt')
