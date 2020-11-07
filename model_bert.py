@@ -44,6 +44,7 @@ class CueBert(BertPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        cue_teacher=None
     ):
         r"""
         cue_labels & cue_sep_labels:
@@ -72,18 +73,17 @@ class CueBert(BertPreTrainedModel):
 
         sequence_output = self.dropout(sequence_output)
         cue_logits = self.cue(sequence_output)
-        cue_temp = F.softmax(cue_logits, -1)
-        cue_temp = torch.argmax(cue_temp, -1).unsqueeze(2).float()
-        cue_sep_logits = self.cue_sep(sequence_output, cue_temp)
+        if cue_teacher is None:
+            cue_temp = F.softmax(cue_logits, -1)
+            cue_temp = torch.argmax(cue_temp, -1).unsqueeze(2).float()
+            cue_sep_logits = self.cue_sep(sequence_output, cue_temp)
+        else:
+            cue_sep_logits = self.cue_sep(sequence_output, cue_teacher.unsqueeze(2).float())
 
-        cue_loss = None
-        cue_sep_loss = None
-        if exists_label:
-            loss_fct = nn.CrossEntropyLoss()
-            cue_loss = loss_fct(cue_logits.view(-1, self.num_labels), cue_labels.view(-1))
-            cue_sep_loss = loss_fct(cue_sep_logits.view(-1, self.max_num_cue), cue_sep_labels.view(-1))
-
-        return (cue_loss, cue_sep_loss) if exists_label else (cue_logits, cue_sep_logits)
+        if param.predict_cuesep:
+            return cue_logits, cue_sep_logits
+        else:
+            return cue_logits
 
 class ScopeBert(BertPreTrainedModel):
     def __init__(self, config):
