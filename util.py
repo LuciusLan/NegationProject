@@ -58,6 +58,8 @@ def init_logger(log_file=None, log_file_level=logging.NOTSET):
         file_handler.setFormatter(log_format)
         logger.addHandler(file_handler)
     return logger
+    
+global_logger = init_logger(log_file=f'{param.model_name}.log')
 
 def pad_sequences(sequences, maxlen=None, dtype='int32',
                   padding='pre', truncating='pre', value=0.):
@@ -212,6 +214,26 @@ def pack_subword_pred(logits, targets, subword_mask) -> Tuple[T, T]:
 
     return actual_logits, actual_label_ids
 
+def pack_subword(seq, subword_mask) -> Tuple[T, T]:
+    """
+    Apply subword mask to restore the original sentence and labels
+
+    Params:
+        logits(Tensor): [batch_size, seq_length, num_classes]
+        targets(Tensor): [batch_size, seq_length]
+    
+    Retruns:
+        (prediction, actual_labels)
+    """
+    seq = np.array(seq.squeeze())
+    subword_mask = np.array(subword_mask)
+
+    new_seq = []
+    for i, j in zip(seq, subword_mask):
+        if j == 1:
+            new_seq.append(i)
+
+    return new_seq
 
 
 class TrainingMonitor():
@@ -292,8 +314,8 @@ class ModelCheckpoint(object):
             checkpoint_dir = checkpoint_dir
         else:
             checkpoint_dir = Path(checkpoint_dir)
-        assert checkpoint_dir.is_dir()
         checkpoint_dir.mkdir(exist_ok=True)
+        assert checkpoint_dir.is_dir()
         self.base_path = checkpoint_dir
         self.arch = arch
         self.monitor = monitor
@@ -348,7 +370,7 @@ class ModelCheckpoint(object):
         model_to_save = state['model']
         if self.save_best_only:
             if self.monitor_op(current, self.best):
-                print(f"\nEpoch {state['epoch']}: {self.monitor} improved from {self.best:.5f} to {current:.5f}")
+                global_logger.info(f"\nEpoch {state['epoch']}: {self.monitor} improved from {self.best:.5f} to {current:.5f}")
                 self.best = current
                 state['best'] = self.best
                 model_to_save.save_pretrained(str(self.base_path))
@@ -361,7 +383,7 @@ class ModelCheckpoint(object):
             if state['epoch'] % self.epoch_freq == 0:
                 save_path = self.base_path / f"checkpoint-epoch-{state['epoch']}"
                 save_path.mkdir(exist_ok=True)
-                print(f"\nEpoch {state['epoch']}: save model to disk.")
+                global_logger.info(f"\nEpoch {state['epoch']}: save model to disk.")
                 model_to_save.save_pretrained(save_path)
                 output_config_file = save_path / 'configs.json'
                 with open(str(output_config_file), 'w') as f:
@@ -427,5 +449,6 @@ class EarlyStopping(object):
                     global_logger.info(f"{self.patience} epochs with no improvement after which training will be stopped")
                 self.stop_training = True
 
-
-global_logger = init_logger(log_file=f'{param.model_name}.log')
+def del_list_idx(li, ids):
+    temp = [i for i in li if i not in frozenset(ids)]
+    return temp

@@ -12,7 +12,7 @@ from typing import List, Tuple, T, Iterable, Union, NewType
 import gensim
 import _pickle
 
-from util import pad_sequences
+from util import pad_sequences, del_list_idx
 from data import RawData
 from params import param
 
@@ -270,16 +270,18 @@ class Processor(object):
             test_len = math.floor(test_size * scope_len)
             val_len = scope_len - train_len - test_len
             scope_index = list(range(scope_len))
-            train_index = random.choices(scope_index, k=train_len)
-            test_index = random.choices(scope_index, k=test_len)
-            dev_index = random.choices(scope_index, k=val_len)
+            train_index = random.sample(scope_index, k=train_len)
+            scope_index = del_list_idx(scope_index, train_index)
+            test_index = random.sample(scope_index, k=test_len)
+            scope_index = del_list_idx(scope_index, test_index)
+            dev_index = scope_index.copy()
 
-            tr_cue = [cue_examples[i] for i in train_index]
-            te_cue = [cue_examples[i] for i in test_index]
-            de_cue = [cue_examples[i] for i in dev_index]
-            tr_scope = [scope_examples[i] for i in train_index]
-            te_scope = [scope_examples[i] for i in test_index]
-            de_scope = [scope_examples[i] for i in dev_index]
+            train_cue = [cue_examples[i] for i in train_index]
+            test_cue = [cue_examples[i] for i in test_index]
+            dev_cue = [cue_examples[i] for i in dev_index]
+            train_scope = [scope_examples[i] for i in train_index]
+            test_scope = [scope_examples[i] for i in test_index]
+            dev_scope = [scope_examples[i] for i in dev_index]
 
             random_state = np.random.randint(1, 2020)
             tr_nocue_, te_nocue = train_test_split(
@@ -289,15 +291,9 @@ class Processor(object):
             random_state2 = np.random.randint(1, 2020)
             tr_nocue, de_nocue = train_test_split(tr_nocue_, test_size=(
                 val_size / (1 - test_size)), random_state=random_state2)
-            tr_cue.extend(tr_nocue)
-            de_cue.extend(de_nocue)
-            te_cue.extend(te_nocue)
-            train_cue = copy.deepcopy(tr_cue)
-            test_cue = copy.deepcopy(te_cue)
-            dev_cue = copy.deepcopy(de_cue)
-            train_scope = copy.deepcopy(tr_scope)
-            test_scope = copy.deepcopy(te_scope)
-            dev_scope = copy.deepcopy(de_scope)
+            train_cue.extend(tr_nocue)
+            dev_cue.extend(de_nocue)
+            test_cue.extend(te_nocue)
             for c1, e1 in enumerate(train_cue):
                 train_cue[c1].guid = f'train-{c1}'
             for c2, e2 in enumerate(test_cue):
@@ -312,14 +308,14 @@ class Processor(object):
                 dev_scope[c6].guid = f'dev-{c6}'
             if cached_file is not None:
                 print('Saving examples into cached file %s', cached_file)
-                torch.save(tr_cue, f'split\\train_cue_{cached_file}')
-                torch.save(te_cue, f'split\\test_cue_{cached_file}')
+                torch.save(train_cue, f'split\\train_cue_{cached_file}')
+                torch.save(test_cue, f'split\\test_cue_{cached_file}')
                 torch.save(dev_cue, f'split\\dev_cue_{cached_file}')
-                torch.save(tr_scope, f'split\\train_scope_{cached_file}')
-                torch.save(te_scope, f'split\\test_scope_{cached_file}')
+                torch.save(train_scope, f'split\\train_scope_{cached_file}')
+                torch.save(test_scope, f'split\\test_scope_{cached_file}')
                 torch.save(dev_scope, f'split\\dev_scope_{cached_file}')
                 torch.save(te_non_cue_sents, f'split\\ns_{cached_file}')
-            return (tr_cue, dev_cue, te_cue), (tr_scope, dev_scope, te_scope)
+            return (train_cue, dev_cue, test_cue), (train_scope, dev_scope, test_scope)
 
     def load_examples(self, file: str):
         """
@@ -807,7 +803,7 @@ class Processor(object):
                 gold_num_cue = gold_nc
             else:
                 gold_num_cue = gold_nc
-                gold_scopes = [2 for i in sent_list]
+                gold_scopes = [[2 for i in sent_list]]
 
             feature = PipelineScopeFeature(guid=cue_ex.guid, or_sent=cue_ex.sent, sents=wrap_sents, input_ids=wrap_input_id,
                                            padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
