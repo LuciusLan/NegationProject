@@ -173,6 +173,37 @@ def scope_to_bioes(scope):
     ids = [bioes_to_id[l] for l in tmp]
     return ids
 
+def single_scope_to_link_matrix_pad(scope: List, padded=True) -> np.ndarray:
+    """
+    To convert the scope list (single cue) to a link matrix that represents
+    the relation link between eachother token.
+    Cue <-> Scope: 1
+    Noncue <-> Noncue: 2
+    Cue <-> Cue: 6
+    Pad: 0
+    """
+    scope_len = len(scope)
+    if not padded:
+        mat_dim = scope_len
+    else:
+        mat_dim = param.max_len
+    mat = np.zeros((mat_dim, mat_dim), dtype=np.int)
+
+    # scan through the matrix by row to fill
+    for i in range(scope_len):
+        if scope[i] == 6:
+            for j, e in enumerate(scope):
+                mat[i][j] = e
+        else:
+            for j, e in enumerate(scope):
+                if e == 6:
+                    mat[i][j] = 1
+                else:
+                    mat[i][j] = 2
+    
+    return mat
+        
+
 class Processor(object):
     def __init__(self):
         self.tokenizer = None
@@ -1019,6 +1050,28 @@ class Processor(object):
                         temp_scope.append(e)
                 if len(scopes) != 1:
                     scope_bioes = scope_to_bioes(temp_scope)
+                else:
+                    scope_bioes = scopes
+                new_features[f_count].scopes[c_count] = scope_bioes
+        return new_features
+
+    def ex_to_matrix(self, data):
+        new_features = data
+        for f_count, feat in enumerate(new_features):
+            for c_count in range(feat.num_cues):
+                cues = feat.cues[c_count]
+                scopes = feat.scopes[c_count]
+                temp_scope = []
+                for i, e in enumerate(scopes):
+                    if e == 2:
+                        if cues[i] != 3:
+                            temp_scope.append(6)
+                        else:
+                            temp_scope.append(e)
+                    else:
+                        temp_scope.append(e)
+                if len(scopes) != 1:
+                    scope_bioes = single_scope_to_link_matrix_pad(temp_scope)
                 else:
                     scope_bioes = scopes
                 new_features[f_count].scopes[c_count] = scope_bioes
