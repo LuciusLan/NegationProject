@@ -17,6 +17,7 @@ class CueSepPooler(nn.Module):
         pack, _ = self.pack(torch.cat([hidden_states, cues], dim=-1))
         pack = self.tanh(pack)
         pack = self.ln(pack)
+
         fc = self.fc(pack)
         return fc
 
@@ -92,6 +93,7 @@ class ScopeBert(BertPreTrainedModel):
         self.bert = BertModel(config, add_pooling_layer=False)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.scope = nn.Linear(config.hidden_size, config.num_labels)
+        #self.scope = BiaffineClassifier(config.hidden_size, config.hidden_size, config.num_labels)
         self.init_weights()
     
     def forward(
@@ -147,7 +149,63 @@ class ScopeBert(BertPreTrainedModel):
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
 
+class BiaffineClassifier(nn.Module):
+    def __init__(self, emb_dim, hid_dim, output_dim, dropout=0.2):
+        super().__init__()
+        self.dep = nn.Linear(emb_dim, hid_dim)
+        self.head = nn.Linear(emb_dim, hid_dim)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout()
+        self.biaffine = PairwiseBiaffine(hid_dim, hid_dim, output_dim)
+    
+    def forward(self, embedding):
+        dep = self.dropout(self.relu(self.dep(embedding)))
+        head = self.dropout(self.relu(self.head(embedding)))
+        out = self.biaffine(dep, head)
+        return out
+        
 
+class PairwiseBilinear(nn.Module):
+    """ A bilinear module that deals with broadcasting for efficient memory usage.
+    Input: tensors of sizes (N x L1 x D1) and (N x L2 x D2)
+    Output: tensor of size (N x L1 x L2 x O)"""
+    def __init__(self, input1_size, input2_size, output_size, bias=True):
+        super().__init__()
+
+        self.input1_size = input1_size
+        self.input2_size = input2_size
+        self.output_size = output_size
+
+        self.weight = nn.Parameter(torch.zeros(input1_size, input2_size, output_size), requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(output_size), requires_grad=True) if bias else 0
+
+    def forward(self, input1, input2):
+        input1_size = list(input1.size())
+        input2_size = list(input2.size())
+        output_size = [input1_size[0], input1_size[1], input2_size[1], self.output_size]
+
+        # ((N x L1) x D1) * (D1 x (D2 x O)) -> (N x L1) x (D2 x O)
+        intermediate = torch.mm(input1.view(-1, input1_size[-1]), self.weight.view(-1, self.input2_size * self.output_size))
+        # (N x L2 x D2) -> (N x D2 x L2)
+        input2 = input2.transpose(1, 2)
+        # (N x (L1 x O) x D2) * (N x D2 x L2) -> (N x (L1 x O) x L2)
+        output = intermediate.view(input1_size[0], input1_size[1] * self.output_size, input2_size[2]).bmm(input2)
+        # (N x (L1 x O) x L2) -> (N x L1 x L2 x O)
+        output = output.view(input1_size[0], input1_size[1], self.output_size, input2_size[1]).transpose(2, 3).contiguous()
+        # (N x L1 x L2 x O) + (O) -> (N x L1 x L2 x O)
+        output = output + self.bias
+
+        return output
+
+class PairwiseBiaffine(nn.Module):
+    def __init__(self, input1_size, input2_size, output_size):
+        super().__init__()
+        self.W_bilin = PairwiseBilinear(input1_size + 1, input2_size + 1, output_size)
+
+    def forward(self, input1, input2):
+        input1 = torch.cat([input1, input1.new_ones(*input1.size()[:-1], 1)], len(input1.size())-1)
+        input2 = torch.cat([input2, input2.new_ones(*input2.size()[:-1], 1)], len(input2.size())-1)
+        return self.W_bilin(input1, input2)
 
 class SpanScopeBert(BertPreTrainedModel):
     def __init__(self, config, num_layers=2, lstm_dropout=0.35, soft_label=False, num_labels=1, *args, **kwargs):
