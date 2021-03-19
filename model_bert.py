@@ -92,8 +92,8 @@ class ScopeBert(BertPreTrainedModel):
         self.num_labels = config.num_labels
         self.bert = BertModel(config, add_pooling_layer=False)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.scope = nn.Linear(config.hidden_size, config.num_labels)
-        #self.scope = BiaffineClassifier(config.hidden_size, config.hidden_size, config.num_labels)
+        #self.scope = nn.Linear(config.hidden_size, config.num_labels)
+        self.scope = BiaffineClassifier(config.hidden_size)
         self.init_weights()
     
     def forward(
@@ -116,7 +116,8 @@ class ScopeBert(BertPreTrainedModel):
             If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
             If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        #return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = False
 
         outputs = self.bert(
             input_ids,
@@ -150,13 +151,15 @@ class ScopeBert(BertPreTrainedModel):
             return ((loss,) + output) if loss is not None else output
 
 class BiaffineClassifier(nn.Module):
-    def __init__(self, emb_dim, hid_dim, output_dim, dropout=0.2):
+    def __init__(self, emb_dim, hid_dim=1024, output_dim=param.label_dim, dropout=0.2):
         super().__init__()
         self.dep = nn.Linear(emb_dim, hid_dim)
         self.head = nn.Linear(emb_dim, hid_dim)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout()
         self.biaffine = PairwiseBiaffine(hid_dim, hid_dim, output_dim)
+        nn.init.xavier_normal_(self.dep.weight)
+        nn.init.xavier_normal_(self.head.weight)
     
     def forward(self, embedding):
         dep = self.dropout(self.relu(self.dep(embedding)))
@@ -178,6 +181,7 @@ class PairwiseBilinear(nn.Module):
 
         self.weight = nn.Parameter(torch.zeros(input1_size, input2_size, output_size), requires_grad=True)
         self.bias = nn.Parameter(torch.zeros(output_size), requires_grad=True) if bias else 0
+        nn.init.xavier_normal_(self.weight)
 
     def forward(self, input1, input2):
         input1_size = list(input1.size())

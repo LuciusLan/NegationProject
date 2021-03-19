@@ -202,7 +202,7 @@ elif param.task == 'scope':
         train_data = proc.ex_to_bioes(train_data)
         dev_data = proc.ex_to_bioes(dev_data)
         test_data = proc.ex_to_bioes(test_data)
-    if param.label_dim == 4:
+    if param.mark_cue:
         train_data = proc.scope_add_cue(train_data)
         dev_data = proc.scope_add_cue(dev_data)
         test_data = proc.scope_add_cue(test_data)
@@ -213,6 +213,11 @@ elif param.task == 'scope':
         dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
     test_feature = proc.create_features(
         test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+
+    if param.matrix:
+        train_feature = proc.ex_to_matrix(train_feature)
+        dev_feature = proc.ex_to_matrix(dev_feature)
+        test_feature = proc.ex_to_matrix(test_feature)
 
     train_ds = proc.create_dataset(
         train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
@@ -390,7 +395,7 @@ for run in range(param.num_runs):
     else:
         criterion = nn.CrossEntropyLoss()
     if param.task == 'cue':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
         early_stopping = EarlyStopping(patience=10, monitor='val_cue_f1')
         trainer = CueTrainer(n_gpu=1,
                              model=model,
@@ -407,7 +412,7 @@ for run in range(param.num_runs):
                              early_stopping=early_stopping
                              )
     elif param.task == 'scope':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'model_chk/{param.model_name}', monitor='val_scope_token_f1', mode='max', arch=param.model_name)
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_scope_token_f1', mode='max', arch=param.model_name)
         early_stopping = EarlyStopping(patience=3, monitor='val_scope_token_f1')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,

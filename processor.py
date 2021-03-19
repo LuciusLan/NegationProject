@@ -176,32 +176,35 @@ def scope_to_bioes(scope):
 def single_scope_to_link_matrix_pad(scope: List, padded=True) -> np.ndarray:
     """
     To convert the scope list (single cue) to a link matrix that represents
-    the relation link between eachother token.
+    the relation (undirected) link between eachother token.
     Cue <-> Scope: 1
     Noncue <-> Noncue: 2
-    Cue <-> Cue: 6
+    Cue <-> Cue: 3
     Pad: 0
     """
     scope_len = len(scope)
+    assert scope_len > 1
     if not padded:
         mat_dim = scope_len
     else:
         mat_dim = param.max_len
     mat = np.zeros((mat_dim, mat_dim), dtype=np.int)
-
+    pos = None
     # scan through the matrix by row to fill
     for i in range(scope_len):
-        if scope[i] == 6:
+        if scope[i] == 3:
+            pos = i
             for j, e in enumerate(scope):
                 mat[i][j] = e
         else:
             for j, e in enumerate(scope):
-                if e == 6:
+                if e == 3:
                     mat[i][j] = 1
                 else:
                     mat[i][j] = 2
     
-    return mat
+    assert pos is not None
+    return mat#, pos
         
 
 class Processor(object):
@@ -572,7 +575,10 @@ class Processor(object):
                                     # current non cue, insert right bound before current pos
                                     new_text.append(f'[unused{prev+1}]')
                                     new_masks.append(0)
-                                    new_scopes.append(2)
+                                    if param.mark_cue:
+                                        new_scopes.append(3)
+                                    else:
+                                        new_scopes.append(2)
                                     new_cues.append(prev)
                                     new_seg.append(seg)
                                     new_text.append(token)
@@ -964,7 +970,8 @@ class Processor(object):
                 padding_mask = pad_sequences(padding_mask,
                                              maxlen=param.max_len, value=0, padding="post",
                                              dtype="long", truncating="post").tolist()
-                scopes = pad_sequences(scopes,
+                if not param.matrix:
+                    scopes = pad_sequences(scopes,
                                        maxlen=param.max_len, value=0, padding="post",
                                        dtype="long", truncating="post").tolist()
                 segments = pad_sequences(segments,
@@ -1065,16 +1072,18 @@ class Processor(object):
                 for i, e in enumerate(scopes):
                     if e == 2:
                         if cues[i] != 3:
-                            temp_scope.append(6)
+                            temp_scope.append(3)
                         else:
                             temp_scope.append(e)
+                    elif e == 3:
+                        pass
                     else:
                         temp_scope.append(e)
                 if len(scopes) != 1:
-                    scope_bioes = single_scope_to_link_matrix_pad(temp_scope)
+                    scope_matrix = single_scope_to_link_matrix_pad(temp_scope)
                 else:
-                    scope_bioes = scopes
-                new_features[f_count].scopes[c_count] = scope_bioes
+                    scope_matrix = scopes
+                new_features[f_count].scopes[c_count] = scope_matrix
         return new_features
 
     def scope_add_cue(self, data: List[ScopeExample]):

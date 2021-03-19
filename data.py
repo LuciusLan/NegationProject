@@ -478,7 +478,7 @@ def bioscope(f_path) -> Tuple[List, List, List]:
     non_cue_cues = [i[1] for i in non_cue_data]
     non_cue_sep = [i[2] for i in non_cue_data]
     non_cue_num = [0 for i in non_cue_data]
-    if param.label_dim == 4:
+    if param.mark_cue:
         for ci, c in enumerate(scope_cues):
             for i, e in enumerate(c):
                 if e == 0 or e == 1 or e == 2:
@@ -601,7 +601,7 @@ def sfu_review(f_path) -> Tuple[List, List, List]:
     non_cue_cues = [i[1] for i in non_cue_data]
     non_cue_sep = [i[2] for i in non_cue_data]
     non_cue_num = [0 for i in non_cue_data]
-    if param.label_dim == 4:
+    if param.mark_cue:
         for ci, c in enumerate(scope_cues):
             for i, e in enumerate(c):
                 if e == 0 or e == 1 or e == 2:

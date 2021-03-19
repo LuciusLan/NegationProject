@@ -8,6 +8,7 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import classification_report
 
+import util
 from util import pack_subword_pred
 from params import param
 
@@ -405,11 +406,32 @@ class ScopeTrainer(object):
 
             self.model.eval()
             with torch.no_grad():
-                scope_logits = self.model(input_ids, padding_mask)[0]
                 active_padding_mask = padding_mask.view(-1) == 1
+                if param.matrix:
+                    pad_matrix = []
+                    for i in range(param.batch_size):
+                        tmp = padding_mask[i]
+                        tmp = tmp.view(param.max_len, 1)
+                        tmp_t = tmp.transpose(0, 1)
+                        mat = tmp * tmp_t
+                        pad_matrix.append(mat)
+                    pad_matrix = torch.stack(pad_matrix, 0)
+                    active_padding_mask = pad_matrix.view(-1) == 1
+
+                    scope_logits = self.model(input_ids, padding_mask)[0]
+                    logits_mask = scope_logits.view(-1, num_labels)[active_padding_mask]
+                    target_mask = scopes.view(-1)[active_padding_mask]
+                    loss = self.criterion(logits_mask, target_mask)
+                else:
+                    scope_logits = self.model(input_ids, padding_mask)[0]
+                    active_padding_mask = padding_mask.view(-1) == 1
                 loss = self.criterion(scope_logits.view(-1, num_labels)[active_padding_mask], scopes.view(-1)[active_padding_mask])
             valid_loss.update(val=loss.item(), n=input_ids.size(0))
+
             if is_bert:
+                ###
+                ### TODO:
+                ### decode the link matrix to the scope sequence for standardized evaluation
                 scope_pred, scope_tar = pack_subword_pred(scope_logits.detach().cpu(), scopes.detach().cpu(), subword_mask.detach().cpu())
                 
             else:
@@ -436,9 +458,25 @@ class ScopeTrainer(object):
             self.model.train()
             batch = tuple(t.to(self.device) for t in batch)
             input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask = batch
-            scope_logits = self.model(input_ids, padding_mask)[0]
             active_padding_mask = padding_mask.view(-1) == 1
-            loss = self.criterion(scope_logits.view(-1, num_labels)[active_padding_mask], scopes.view(-1)[active_padding_mask])
+            if param.matrix:
+                pad_matrix = []
+                for i in range(param.batch_size):
+                    tmp = padding_mask[i]
+                    tmp = tmp.view(param.max_len, 1)
+                    tmp_t = tmp.transpose(0, 1)
+                    mat = tmp * tmp_t
+                    pad_matrix.append(mat)
+                pad_matrix = torch.stack(pad_matrix, 0)
+                active_padding_mask = pad_matrix.view(-1) == 1
+
+                scope_logits = self.model(input_ids, padding_mask)[0]
+                logits_mask = scope_logits.view(-1, num_labels)[active_padding_mask]
+                target_mask = scopes.view(-1)[active_padding_mask]
+                loss = self.criterion(logits_mask, target_mask)
+            else:
+                scope_logits = self.model(input_ids, padding_mask)[0]
+                loss = self.criterion(scope_logits.view(-1, num_labels)[active_padding_mask], scopes.view(-1)[active_padding_mask])
 
             #if len(self.n_gpu.split(",")) >= 2:
             #    loss = loss.mean()
