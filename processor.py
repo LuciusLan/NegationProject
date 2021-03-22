@@ -203,7 +203,7 @@ def single_scope_to_link_matrix_pad(scope: List, padded=True) -> np.ndarray:
                 else:
                     mat[i][j] = 2
     
-    assert pos is not None
+    #assert pos is not None
     return mat#, pos
         
 
@@ -328,27 +328,27 @@ class Processor(object):
             train_cue.extend(tr_nocue)
             dev_cue.extend(de_nocue)
             test_cue.extend(te_nocue)
-            for c1, e1 in enumerate(train_cue):
-                train_cue[c1].guid = f'train-{c1}'
-            for c2, e2 in enumerate(test_cue):
-                test_cue[c2].guid = f'test-{c2}'
-            for c3, e3 in enumerate(dev_cue):
-                dev_cue[c3].guid = f'dev-{c3}'
-            for c4, e4 in enumerate(train_scope):
-                train_scope[c4].guid = f'train-{c4}'
-            for c5, e5 in enumerate(test_scope):
-                test_scope[c5].guid = f'test-{c5}'
-            for c6, e6 in enumerate(dev_scope):
-                dev_scope[c6].guid = f'dev-{c6}'
+            for c, _ in enumerate(train_cue):
+                train_cue[c].guid = f'train-{c}'
+            for c, _ in enumerate(test_cue):
+                test_cue[c].guid = f'test-{c}'
+            for c, _ in enumerate(dev_cue):
+                dev_cue[c].guid = f'dev-{c}'
+            for c, _ in enumerate(train_scope):
+                train_scope[c].guid = f'train-{c}'
+            for c, _ in enumerate(test_scope):
+                test_scope[c].guid = f'test-{c}'
+            for c, _ in enumerate(dev_scope):
+                dev_scope[c].guid = f'dev-{c}'
             if cached_file is not None:
                 print('Saving examples into cached file %s', cached_file)
-                torch.save(train_cue, f'split\\train_cue_{cached_file}')
-                torch.save(test_cue, f'split\\test_cue_{cached_file}')
-                torch.save(dev_cue, f'split\\dev_cue_{cached_file}')
-                torch.save(train_scope, f'split\\train_scope_{cached_file}')
-                torch.save(test_scope, f'split\\test_scope_{cached_file}')
-                torch.save(dev_scope, f'split\\dev_scope_{cached_file}')
-                torch.save(te_non_cue_sents, f'split\\ns_{cached_file}')
+                torch.save(train_cue, f'{param.base_path}/split/train_cue_{cached_file}')
+                torch.save(test_cue, f'{param.base_path}/split/test_cue_{cached_file}')
+                torch.save(dev_cue, f'{param.base_path}/split/dev_cue_{cached_file}')
+                torch.save(train_scope, f'{param.base_path}/split/train_scope_{cached_file}')
+                torch.save(test_scope, f'{param.base_path}/split/test_scope_{cached_file}')
+                torch.save(dev_scope, f'{param.base_path}/split/dev_scope_{cached_file}')
+                torch.save(te_non_cue_sents, f'{param.base_path}/split/ns_{cached_file}')
             return (train_cue, dev_cue, test_cue), (train_scope, dev_scope, test_scope)
 
     def load_examples(self, file: str):
@@ -1066,6 +1066,7 @@ class Processor(object):
         new_features = data
         for f_count, feat in enumerate(new_features):
             for c_count in range(feat.num_cues):
+                assert feat.num_cues != 0
                 cues = feat.cues[c_count]
                 scopes = feat.scopes[c_count]
                 temp_scope = []

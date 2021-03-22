@@ -413,7 +413,7 @@ for run in range(param.num_runs):
                              )
     elif param.task == 'scope':
         model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_scope_token_f1', mode='max', arch=param.model_name)
-        early_stopping = EarlyStopping(patience=3, monitor='val_scope_token_f1')
+        early_stopping = EarlyStopping(patience=20, monitor='val_scope_token_f1')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,
                                logger=global_logger,
@@ -425,7 +425,8 @@ for run in range(param.num_runs):
                                model_checkpoint=model_checkpoint,
                                resume_path=None,
                                grad_clip=5.0,
-                               gradient_accumulation_steps=1
+                               gradient_accumulation_steps=1,
+                               early_stopping=early_stopping
                                )
 
     trainer.train(train_data=train_dl, valid_data=dev_dl,

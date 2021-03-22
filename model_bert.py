@@ -93,7 +93,7 @@ class ScopeBert(BertPreTrainedModel):
         self.bert = BertModel(config, add_pooling_layer=False)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         #self.scope = nn.Linear(config.hidden_size, config.num_labels)
-        self.scope = BiaffineClassifier(config.hidden_size)
+        self.scope = BiaffineClassifier(config.hidden_size, config.hidden_size, output_dim=config.num_labels)
         self.init_weights()
     
     def forward(
@@ -151,20 +151,26 @@ class ScopeBert(BertPreTrainedModel):
             return ((loss,) + output) if loss is not None else output
 
 class BiaffineClassifier(nn.Module):
-    def __init__(self, emb_dim, hid_dim=1024, output_dim=param.label_dim, dropout=0.2):
+    def __init__(self, emb_dim, hid_dim, output_dim=param.label_dim, dropout=0.2):
         super().__init__()
         self.dep = nn.Linear(emb_dim, hid_dim)
         self.head = nn.Linear(emb_dim, hid_dim)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout()
         self.biaffine = PairwiseBiaffine(hid_dim, hid_dim, output_dim)
+        #self.decoder = nn.Linear(param.max_len*param.max_len, param.max_len)
+        self.output_dim = output_dim
         nn.init.xavier_normal_(self.dep.weight)
         nn.init.xavier_normal_(self.head.weight)
     
     def forward(self, embedding):
+        bs = embedding.size(0)
         dep = self.dropout(self.relu(self.dep(embedding)))
         head = self.dropout(self.relu(self.head(embedding)))
-        out = self.biaffine(dep, head)
+        out = self.biaffine(dep, head).view(bs, -1, self.output_dim)
+        #out = out.transpose(1, 2)
+        #out = self.decoder(out)
+        #out = out.transpose(1, 2)
         return out
         
 
