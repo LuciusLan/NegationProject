@@ -1,5 +1,6 @@
 from typing import List, Tuple, T
 import logging
+import math
 import json
 import six
 import numpy as np
@@ -158,17 +159,95 @@ def pad_sequences(sequences, maxlen=None, dtype='int32',
             raise ValueError('Padding type "%s" not understood' % padding)
     return x
 
-def pack_subword_pred(logits, targets, subword_mask) -> Tuple[T, T]:
+def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=True, mode='col'):
+    """
+    Decode the link-matrix to a prediction sequence (single cue case)
+    Assumed single cue (multiword cue included), and high quality prediction. 
+    That is, only first row containing cue indicator will be extracted
+
+    Params:
+        logits(Tensor): [batch_size, seq_length, seq_length, num_classes]
+        pad(List[Tensor]): padding matrix
+        isLogit(boolean): drop a dimension when input is target (isLogit=False)
+        mode: ('row', 'col', 'mean') rule to select target sequence. 
+            row: return the first row containing a cue
+            col: return the first column containing a cue
+            mean: returan the mean of the all candidates.
+    Retruns:
+        target_seq(Tensor): [batch_size, seq_length, num_classes]
+    """
+    bs = logits.size(0)
+    padding_mask = pad == 1
+    if islogit:
+        batch = []
+        for i in range(bs):
+            tmp = logits.view(bs, param.max_len, param.max_len, param.label_dim)[i][padding_mask[i]]
+            dim = int(math.sqrt(tmp.size(0)))
+            tmp = tmp.view(dim, dim, -1)
+            batch.append(tmp)
+        mat_tmp = [e.argmax(-1).tolist() for e in batch]
+    else:
+        batch = []
+        for i in range(bs):
+            tmp = logits.view(bs, param.max_len, param.max_len)[i][padding_mask[i]]
+            dim = int(math.sqrt(tmp.size(0)))
+            tmp = tmp.view(dim, dim)
+            batch.append(tmp)
+        mat_tmp = [e.tolist() for e in batch]
+    def pos_first_cue_row(mat):
+        rp = 0
+        cp = 0
+        for row_i, row_e in enumerate(mat):
+            for col_i, col_e in enumerate(row_e):
+                if col_e == 3:
+                    rp = row_i + 1
+                    cp = col_i + 1
+                    return rp, cp
+        return 0, 0
+
+    def all_cue_pos(mat):
+        rp = []
+        cp = []
+        for row_i, row_e in enumerate(mat):
+            for col_i, col_e in enumerate(row_e):
+                if col_e == 3:
+                    rp.append(row_i)
+                    cp.append(col_i)
+        rp = list(set(rp))
+        cp = list(set(cp))
+        return rp, cp
+                
+    pred_scopes = []
+    for i, m in enumerate(mat_tmp):
+        rp, cp = pos_first_cue_row(m)
+        if mode == 'row':
+            pred_scopes.append(batch[i][rp])
+        elif mode == 'col':
+            pred_scopes.append(batch[i][:][cp])
+        elif mode == 'mean':
+            tmp = []
+            rows, cols = all_cue_pos(mat_tmp[i])
+            for ri in rows:
+                tmp.append(batch[i][ri])
+            for ci in cols:
+                tmp.append(batch[i][:][ci])
+            tmp = torch.stack(tmp)
+            pred_scopes.append(tmp.mean(0))
+    return pred_scopes
+
+def pack_subword_pred(logits, targets, subword_mask, padding_mask) -> Tuple[T, T]:
     """
     Apply subword mask to restore the original sentence and labels
 
     Params:
         logits(Tensor): [batch_size, seq_length, num_classes]
         targets(Tensor): [batch_size, seq_length]
-    
-    Retruns:
+        subword_mask(Tensor): [bs, seq_length]
+        padding_mask(Tensor): [bs, seq_length]
+    Returns:
         (prediction, actual_labels)
     """
+    bs = logits.size(0)
     logits = logits.numpy()
     targets = targets.numpy()
     subword_mask = subword_mask.numpy()
@@ -176,36 +255,38 @@ def pack_subword_pred(logits, targets, subword_mask) -> Tuple[T, T]:
 
     actual_logits = []
     actual_label_ids = []
-
-    for logit, label, mask in zip(logits, targets, subword_mask):
+    for i in range(bs):
+        pad = padding_mask[i] == 1
+        logit = logits[i]
+        label = targets[i]
+        mask = subword_mask[i][pad]
 
         actual_label_ids.append(
             [i for i, j in zip(label, mask) if j == 1])
-        curr_preds = []
+        word_pieces = []
         new_logits = []
         in_split = 0
+        head = 0
         for i, j in zip(logit, mask):
             if j == 1:
                 if in_split == 1:
-                    if len(new_logits) > 0:
-                        curr_preds.append(new_logits[-1])
-                    mode_pred = np.argmax(np.average(
-                        np.array(curr_preds), axis=0), axis=0)
+                    word_pieces.insert(0, head)
+                    mode_pred = np.argmax(np.average(word_pieces, axis=0), axis=0)
                     if len(new_logits) > 0:
                         new_logits[-1] = mode_pred
                     else:
                         new_logits.append(mode_pred)
-                    curr_preds = []
+                    word_pieces = []
                     in_split = 0
                 new_logits.append(np.argmax(i))
+                head = i
             if j == 0:
-                curr_preds.append(i)
+                word_pieces.append(i)
                 in_split = 1
         if in_split == 1:
-            if len(new_logits) > 0:
-                curr_preds.append(new_logits[-1])
+            word_pieces.insert(0, head)
             mode_pred = np.argmax(np.average(
-                np.array(curr_preds), axis=0), axis=0)
+                np.array(word_pieces), axis=0), axis=0)
             if len(new_logits) > 0:
                 new_logits[-1] = mode_pred
             else:
@@ -213,6 +294,9 @@ def pack_subword_pred(logits, targets, subword_mask) -> Tuple[T, T]:
         actual_logits.append(new_logits)
 
     return actual_logits, actual_label_ids
+
+def drop_padding(sequences):
+    pass
 
 def pack_subword(seq, subword_mask) -> Tuple[T, T]:
     """

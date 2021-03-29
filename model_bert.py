@@ -92,8 +92,10 @@ class ScopeBert(BertPreTrainedModel):
         self.num_labels = config.num_labels
         self.bert = BertModel(config, add_pooling_layer=False)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        #self.scope = nn.Linear(config.hidden_size, config.num_labels)
-        self.scope = BiaffineClassifier(config.hidden_size, config.hidden_size, output_dim=config.num_labels)
+        if param.matrix:
+            self.scope = BiaffineClassifier(config.hidden_size, config.hidden_size, output_dim=config.num_labels)
+        else:
+            self.scope = nn.Linear(config.hidden_size, config.num_labels)
         self.init_weights()
     
     def forward(
@@ -157,8 +159,9 @@ class BiaffineClassifier(nn.Module):
         self.head = nn.Linear(emb_dim, hid_dim)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout()
+        #self.biaffine = nn.Bilinear(hid_dim, hid_dim, output_dim)
         self.biaffine = PairwiseBiaffine(hid_dim, hid_dim, output_dim)
-        #self.decoder = nn.Linear(param.max_len*param.max_len, param.max_len)
+        self.decoder = nn.Linear(param.max_len*param.max_len, param.max_len)
         self.output_dim = output_dim
         nn.init.xavier_normal_(self.dep.weight)
         nn.init.xavier_normal_(self.head.weight)
@@ -169,7 +172,7 @@ class BiaffineClassifier(nn.Module):
         head = self.dropout(self.relu(self.head(embedding)))
         out = self.biaffine(dep, head).view(bs, -1, self.output_dim)
         #out = out.transpose(1, 2)
-        #out = self.decoder(out)
+        #out = self.decoder(self.dropout(out))
         #out = out.transpose(1, 2)
         return out
         

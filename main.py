@@ -395,8 +395,8 @@ for run in range(param.num_runs):
     else:
         criterion = nn.CrossEntropyLoss()
     if param.task == 'cue':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
-        early_stopping = EarlyStopping(patience=10, monitor='val_cue_f1')
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'{param.base_path}/model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
+        early_stopping = EarlyStopping(patience=10, monitor='val_cue_f1', mode='max')
         trainer = CueTrainer(n_gpu=1,
                              model=model,
                              logger=global_logger,
@@ -412,8 +412,8 @@ for run in range(param.num_runs):
                              early_stopping=early_stopping
                              )
     elif param.task == 'scope':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_scope_token_f1', mode='max', arch=param.model_name)
-        early_stopping = EarlyStopping(patience=20, monitor='val_scope_token_f1')
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'{param.base_path}/model_chk/{param.model_name}', monitor='val_scope_token_f1', mode='max', arch=param.model_name)
+        early_stopping = EarlyStopping(patience=10, monitor='val_scope_token_f1', mode='max')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,
                                logger=global_logger,

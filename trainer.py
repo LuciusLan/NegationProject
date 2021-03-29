@@ -425,29 +425,34 @@ class ScopeTrainer(object):
                 else:
                     scope_logits = self.model(input_ids, padding_mask)[0]
                     active_padding_mask = padding_mask.view(-1) == 1
-                loss = self.criterion(scope_logits.view(-1, num_labels)[active_padding_mask.view(-1)], scopes.view(-1)[active_padding_mask.view(-1)])
+                    loss = self.criterion(scope_logits.view(-1, num_labels)[active_padding_mask.view(-1)], scopes.view(-1)[active_padding_mask.view(-1)])
             valid_loss.update(val=loss.item(), n=input_ids.size(0))
 
             if is_bert:
                 ###
                 ### TODO:
-                ### decode the link matrix to the scope sequence for standardized evaluation
-                #scope_pred, scope_tar = pack_subword_pred(scope_logits.detach().cpu(), scopes.detach().cpu(), subword_mask.detach().cpu())
-                scope_pred = logits_mask.argmax(-1)
-                scope_tar = target_mask
+                ### decode the adjacency matrix to the scope sequence for standardized evaluation
+                if param.matrix:
+                    tmp_scope_pred = util.matrix_decode_toseq(scope_logits, pad_matrix)
+                    tmp_scope_tar = util.matrix_decode_toseq(scopes, pad_matrix, False)
+                    
+                    scope_pred = []
+                    scope_tar = []
+                    for i in range(bs):
+                        pred, tar = pack_subword_pred(tmp_scope_pred[i].detach().cpu().unsqueeze(0), tmp_scope_tar[i].detach().cpu().unsqueeze(0), subword_mask[i].detach().cpu().unsqueeze(0), padding_mask[i].cpu().unsqueeze(0))
+                        scope_pred.append(pred[0])
+                        scope_tar.append(tar[0])
+                else:
+                    scope_pred, scope_tar = pack_subword_pred(scope_logits.detach().cpu(), scopes.detach().cpu(), subword_mask.detach().cpu(), padding_mask.cpu())
 
             else:
                 scope_pred = scope_logits.argmax()
                 scope_tar = scopes
 
-            if param.matrix:
-                wrap_scope_pred.extend(scope_pred.tolist())
-                wrap_scope_tar.extend(scope_tar.tolist())
-            else:
-                for i1, sent in enumerate(scope_pred):
-                    for i2, _ in enumerate(sent):
-                        wrap_scope_pred.append(scope_pred[i1][i2].tolist())
-                        wrap_scope_tar.append(scope_tar[i1][i2].tolist())
+            for i1, sent in enumerate(scope_pred):
+                for i2, _ in enumerate(sent):
+                    wrap_scope_pred.append(scope_pred[i1][i2].tolist())
+                    wrap_scope_tar.append(scope_tar[i1][i2].tolist())
 
             pbar.update()
             pbar.set_postfix({'loss': loss.item()})
