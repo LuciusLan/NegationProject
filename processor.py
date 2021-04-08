@@ -3,6 +3,7 @@ import math
 import copy
 import gc
 import torch
+from torch import Tensor
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Dataset
 from sklearn.model_selection import train_test_split
 from transformers import BertTokenizer, AutoTokenizer
@@ -173,7 +174,8 @@ def scope_to_bioes(scope):
     ids = [bioes_to_id[l] for l in tmp]
     return ids
 
-def single_scope_to_link_matrix_pad(scope: List, padded=True) -> np.ndarray:
+def single_scope_to_link_matrix_pad(scope: List, cues: List,
+                                    input_len: int, mode=param.m_dir) -> np.ndarray:
     """
     To convert the scope list (single cue) to a link matrix that represents
     the relation (undirected) link between eachother token.
@@ -181,31 +183,43 @@ def single_scope_to_link_matrix_pad(scope: List, padded=True) -> np.ndarray:
     Noncue <-> Noncue: 2
     Cue <-> Cue: 3
     Pad: 0
+
+    params:
+        mode: ['d', 'ud'] d for directed, ud for undirected
     """
-    scope_len = len(scope)
-    assert scope_len > 1
-    if not padded:
-        mat_dim = scope_len
-    else:
-        mat_dim = param.max_len
+    temp_scope = []
+    for i, e in enumerate(scope):
+        if e == 2:
+            if cues[i] != 3:
+                temp_scope.append(3)
+            else:
+                temp_scope.append(e)
+        else:
+            temp_scope.append(e)
+    mat_dim = param.max_len
     mat = np.zeros((mat_dim, mat_dim), dtype=np.int)
     pos = None
     # scan through the matrix by row to fill
-    for i in range(scope_len):
+    for i in range(input_len):
         if scope[i] == 3:
+            # The row at cue
             pos = i
-            for j, e in enumerate(scope):
-                mat[i][j] = e
+            for j in range(input_len):
+                mat[i][j] = scope[j]
         else:
-            for j, e in enumerate(scope):
-                if e == 3:
-                    mat[i][j] = 1
+            for j in range(input_len):
+                if scope[j] == 3:
+                    if scope[i] == 1 and mode == 'd':
+                        mat[i][j] = 4
+                    elif scope[i] == 1 and mode == 'd2':
+                        mat[i][j] = 2
+                    else:
+                        mat[i][j] = scope[i]
                 else:
                     mat[i][j] = 2
-    
+    mat = torch.LongTensor(mat)
     #assert pos is not None
     return mat#, pos
-        
 
 class Processor(object):
     def __init__(self):
@@ -501,93 +515,82 @@ class Processor(object):
                                                                 temp_scope, temp_mask, temp_seg):
                             # Process the cue augmentation.
                             # Different from the original repo, the strategy is indicate the cue border
-                            if cue != 3:
-                                if pos != 0 and pos != len(sent)-1:
-                                    if cue == prev:
-                                        # continued cue, don't care is subword or multi word cue
-                                        new_masks.append(mask)
-                                        new_text.append(token)
-                                        new_scopes.append(label)
-                                        new_cues.append(cue)
-                                        new_seg.append(seg)
-                                    else:
-                                        # left bound
-                                        new_text.append(f'[unused{cue+1}]')
-                                        new_cues.append(cue)
+                            if param.augment_cue:
+                                if cue != 3:
+                                    if pos != 0 and pos != len(sent)-1:
+                                        if cue == prev:
+                                            # continued cue, don't care is subword or multi word cue
+                                            new_masks.append(mask)
+                                            new_text.append(token)
+                                            new_scopes.append(label)
+                                            new_cues.append(cue)
+                                            new_seg.append(seg)
+                                        else:
+                                            # left bound
+                                            new_text.append(f'[unused1]')
+                                            new_cues.append(cue)
+                                            new_masks.append(1)
+                                            new_scopes.append(label)
+                                            new_seg.append(seg)
+                                            new_text.append(token)
+                                            new_masks.append(0)
+                                            new_scopes.append(label)
+                                            new_cues.append(cue)
+                                            new_seg.append(seg)
+                                    elif pos == 0:
+                                        # at pos 0
+                                        new_text.append(f'[unused1]')
                                         new_masks.append(1)
                                         new_scopes.append(label)
+                                        new_cues.append(cue)
                                         new_seg.append(seg)
                                         new_text.append(token)
                                         new_masks.append(0)
                                         new_scopes.append(label)
                                         new_cues.append(cue)
                                         new_seg.append(seg)
-                                elif pos == 0:
-                                    # at pos 0
-                                    new_text.append(f'[unused{cue+1}]')
-                                    new_masks.append(1)
-                                    new_scopes.append(label)
-                                    new_cues.append(cue)
-                                    new_seg.append(seg)
-                                    new_text.append(token)
-                                    new_masks.append(0)
-                                    new_scopes.append(label)
-                                    new_cues.append(cue)
-                                    new_seg.append(seg)
-                                else:
-                                    # at eos
-                                    new_text.append(token)
-                                    new_masks.append(mask)
-                                    new_scopes.append(label)
-                                    new_cues.append(cue)
-                                    new_seg.append(seg)
-                                    new_text.append(f'[unused{cue+1}]')
-                                    new_masks.append(0)
-                                    new_scopes.append(label)
-                                    new_cues.append(cue)
-                                    new_seg.append(seg)
-                                    """
-                                    if cue != 3:
-                                        if first_part == 0:
-                                            first_part = 1
-                                            new_text.append(f'[unused{cue+1}]')
-                                            new_masks.append(1)
-                                            new_scopes.append(label)
-                                            new_text.append(token)
-                                            new_masks.append(0)
-                                            new_scopes.append(label)
-                                            continue
-                                        if cue != 0:
-                                            # only set the unused token when subword is not part of affix cue
-                                            # when affix, set all following subword as non cue
-                                            new_text.append(f'[unused{cue+1}]')
-                                            new_masks.append(0)
-                                            new_scopes.append(label)
-                                    """
-                            else:
-                                if cue == prev:
-                                    new_text.append(token)
-                                    new_masks.append(mask)
-                                    new_scopes.append(label)
-                                    new_cues.append(cue)
-                                    new_seg.append(seg)
-                                else:
-                                    # current non cue, insert right bound before current pos
-                                    new_text.append(f'[unused{prev+1}]')
-                                    new_masks.append(0)
-                                    if param.mark_cue:
-                                        new_scopes.append(3)
                                     else:
-                                        new_scopes.append(2)
-                                    new_cues.append(prev)
-                                    new_seg.append(seg)
-                                    new_text.append(token)
-                                    new_masks.append(mask)
-                                    new_scopes.append(label)
-                                    new_cues.append(cue)
-                                    new_seg.append(seg)
-                            prev = cue
-                            pos += 1
+                                        # at eos
+                                        new_text.append(token)
+                                        new_masks.append(mask)
+                                        new_scopes.append(label)
+                                        new_cues.append(cue)
+                                        new_seg.append(seg)
+                                        new_text.append(f'[unused1]')
+                                        new_masks.append(0)
+                                        new_scopes.append(label)
+                                        new_cues.append(cue)
+                                        new_seg.append(seg)
+                                else:
+                                    if cue == prev:
+                                        new_text.append(token)
+                                        new_masks.append(mask)
+                                        new_scopes.append(label)
+                                        new_cues.append(cue)
+                                        new_seg.append(seg)
+                                    else:
+                                        # current non cue, insert right bound before current pos
+                                        new_text.append(f'[unused1]')
+                                        new_masks.append(0)
+                                        if param.mark_cue:
+                                            new_scopes.append(3)
+                                        else:
+                                            new_scopes.append(2)
+                                        new_cues.append(prev)
+                                        new_seg.append(seg)
+                                        new_text.append(token)
+                                        new_masks.append(mask)
+                                        new_scopes.append(label)
+                                        new_cues.append(cue)
+                                        new_seg.append(seg)
+                                prev = cue
+                                pos += 1
+                            else:
+                                new_masks.append(mask)
+                                new_text.append(token)
+                                new_scopes.append(label)
+                                new_cues.append(cue)
+                                new_seg.append(seg)
 
                         if len(new_text) >= max_seq_len - 1:
                             new_text = new_text[0:(max_seq_len - 2)]
@@ -631,13 +634,6 @@ class Processor(object):
                             seg = seg[0:(max_seq_len - 2)]
 
                         words = self.tokenizer.tokenize(sent)
-                        for i, w in enumerate(words):
-                            if '<AFF>' in w:
-                                words[i-1] = words[i-1] + words[i][5:]
-                                words.pop(i)
-                                cues.pop(i)
-                                scopes.pop(i)
-
                         words.insert(0, '[CLS]')
                         words.append('[SEP]')
                         cues.insert(0, 3)
@@ -970,10 +966,10 @@ class Processor(object):
                 padding_mask = pad_sequences(padding_mask,
                                              maxlen=param.max_len, value=0, padding="post",
                                              dtype="long", truncating="post").tolist()
-                if not param.matrix:
-                    scopes = pad_sequences(scopes,
-                                       maxlen=param.max_len, value=0, padding="post",
-                                       dtype="long", truncating="post").tolist()
+                
+                scopes = pad_sequences(scopes,
+                                    maxlen=param.max_len, value=0, padding="post",
+                                    dtype="long", truncating="post").tolist()
                 segments = pad_sequences(segments,
                                          maxlen=param.max_len, value=0, padding="post",
                                          dtype="long", truncating="post").tolist()
@@ -990,8 +986,12 @@ class Processor(object):
                 input_len = torch.LongTensor(input_len)
                 cues = torch.LongTensor(cues)
                 segments = torch.LongTensor(segments)
-                subword_mask = torch.LongTensor(subword_mask)
-                return TensorDataset(input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask)
+                subword_masks = torch.LongTensor(subword_mask)
+                scopes_matrix = self.scope_to_matrix(scopes, cues, input_len)
+                if param.matrix:
+                    return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks, scopes_matrix)
+                else:
+                    return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks)
             else:
                 input_ids = []
                 padding_mask = []
@@ -1007,6 +1007,7 @@ class Processor(object):
                         input_len.append(feature.input_len[cue_i])
                         segments.append(feature.segments[cue_i])
                         cues.append(feature.cues[cue_i])
+                        assert len(feature.scopes[cue_i]) == len(feature.cues[cue_i])
                 input_ids = pad_sequences(input_ids,
                                           maxlen=param.max_len, value=0, padding="post",
                                           dtype="long", truncating="post").tolist()
@@ -1029,7 +1030,11 @@ class Processor(object):
                 segments = torch.LongTensor(segments)
                 cues = torch.LongTensor(cues)
                 subword_masks = torch.zeros_like(input_ids)
-                return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks)
+                scopes_matrix = self.scope_to_matrix(scopes, cues, input_len)
+                if param.matrix:
+                    return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks, scopes_matrix)
+                else:
+                    return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks)
         elif cue_or_scope.lower() == 'pipeline' and example_type.lower() == 'test':
             return Dataset(features)
         else:
@@ -1062,30 +1067,30 @@ class Processor(object):
                 new_features[f_count].scopes[c_count] = scope_bioes
         return new_features
 
-    def ex_to_matrix(self, data):
-        new_features = data
-        for f_count, feat in enumerate(new_features):
-            for c_count in range(feat.num_cues):
-                assert feat.num_cues != 0
-                cues = feat.cues[c_count]
-                scopes = feat.scopes[c_count]
-                temp_scope = []
-                for i, e in enumerate(scopes):
-                    if e == 2:
-                        if cues[i] != 3:
-                            temp_scope.append(3)
-                        else:
-                            temp_scope.append(e)
-                    elif e == 3:
-                        pass
+    def scope_to_matrix(self, scopes: Tensor, cues: Tensor, input_lens: Tensor):
+        dataset_size = scopes.size(0)
+        all_scope_matrix = []
+        for i in range(dataset_size):
+            temp_scope = []
+            scope = scopes[i].tolist()
+            cue = cues[i].tolist()
+            input_len = input_lens[i].tolist()
+            for j, e in enumerate(scope):
+                if e == 2:
+                    if cue[j] != 3:
+                        temp_scope.append(3)
                     else:
                         temp_scope.append(e)
-                if len(scopes) != 1:
-                    scope_matrix = single_scope_to_link_matrix_pad(temp_scope)
                 else:
-                    scope_matrix = scopes
-                new_features[f_count].scopes[c_count] = scope_matrix
-        return new_features
+                    temp_scope.append(e)
+            if len(scope) != 1:
+                assert len(scope) == len(cue)
+                scope_matrix = single_scope_to_link_matrix_pad(temp_scope, cue, input_len)
+            else:
+                scope_matrix = scope
+            all_scope_matrix.append(scope_matrix)
+        all_scope_matrix = torch.stack(all_scope_matrix, 0)
+        return all_scope_matrix
 
     def scope_add_cue(self, data: List[ScopeExample]):
         new_features = data

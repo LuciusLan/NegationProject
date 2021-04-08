@@ -214,11 +214,6 @@ elif param.task == 'scope':
     test_feature = proc.create_features(
         test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
 
-    if param.matrix:
-        train_feature = proc.ex_to_matrix(train_feature)
-        dev_feature = proc.ex_to_matrix(dev_feature)
-        test_feature = proc.ex_to_matrix(test_feature)
-
     train_ds = proc.create_dataset(
         train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
     dev_ds = proc.create_dataset(
@@ -340,8 +335,9 @@ tokenizer = proc.tokenizer
 
 
 best_f = 0
+all_f1 = []
 for run in range(param.num_runs):
-    
+    global_logger.info(f'\nrun-{run}')
     if param.task == 'cue':
         model = CueBert.from_pretrained(
             'bert-base-cased', cache_dir='bert_base_cased_model', num_labels=4)
@@ -379,11 +375,11 @@ for run in range(param.num_runs):
              'lr': param.lr},
             {'params': [p for n, p in scope_fc_param_optimizer if not any(nd in n for nd in no_decay)],
              'weight_decay': 0.01,
-             'lr': 0.0005},
+             'lr': param.lr},
             {'params': [p for n, p in scope_fc_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
-             'lr': 0.0005},
+             'lr': param.lr},
         ]
-    t_total = int(len(train_dl) / 1 * 200)
+    t_total = int(len(train_dl) / 1 * param.num_ep)
     optimizer = BertAdam(optimizer_grouped_parameters, lr=param.lr,
                          warmup=0.05, t_total=t_total)
     lr_scheduler = BERTReduceLROnPlateau(optimizer, lr=param.lr, mode='max', factor=0.5, patience=5,
@@ -395,7 +391,7 @@ for run in range(param.num_runs):
     else:
         criterion = nn.CrossEntropyLoss()
     if param.task == 'cue':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'{param.base_path}/model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
         early_stopping = EarlyStopping(patience=10, monitor='val_cue_f1', mode='max')
         trainer = CueTrainer(n_gpu=1,
                              model=model,
@@ -412,7 +408,9 @@ for run in range(param.num_runs):
                              early_stopping=early_stopping
                              )
     elif param.task == 'scope':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'{param.base_path}/model_chk/{param.model_name}', monitor='val_scope_token_f1', mode='max', arch=param.model_name)
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', 
+                                           monitor='val_scope_token_f1', mode='max', arch=param.model_name,
+                                           best=best_f)
         early_stopping = EarlyStopping(patience=10, monitor='val_scope_token_f1', mode='max')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,
@@ -439,12 +437,11 @@ for run in range(param.num_runs):
         f1 = target_weight_score(cue_test_info, ['0', '1', '2'])
     elif param.task == 'scope':  
         scope_val_info = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
-        if not param.bioes:
-            f1 = target_weight_score(scope_val_info, ['1'])
-        else:
-            f1 = target_weight_score(scope_val_info, ['1', '2', '3', '4'])
+        f1 = target_weight_score(scope_val_info, ['1'])
         global_logger.info(f1)
-    
+        if f1[0] > best_f:
+            best_f = f1[0]
+        all_f1.append(f1[0])
     """
     model = ScopeRNN(vocab_size=tokenizer.dictionary.__len__(), tokenizer=tokenizer)
     model.to(device)
@@ -554,3 +551,7 @@ for run in range(param.num_runs):
     
     #del model
     """
+global_logger.info(all_f1)
+all_f1 = np.array(all_f1)
+global_logger.info(all_f1.mean())
+global_logger.info(all_f1.std())

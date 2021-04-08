@@ -93,9 +93,18 @@ class ScopeBert(BertPreTrainedModel):
         self.bert = BertModel(config, add_pooling_layer=False)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         if param.matrix:
-            self.scope = BiaffineClassifier(config.hidden_size, config.hidden_size, output_dim=config.num_labels)
+            if param.augment_cue:
+                self.scope = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
+            else:
+                self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
+                self.scope = BiaffineClassifier(300*2, 1024, output_dim=config.num_labels)
         else:
-            self.scope = nn.Linear(config.hidden_size, config.num_labels)
+            if param.augment_cue:
+                self.scope = nn.Linear(config.hidden_size, config.num_labels)
+            else:
+                self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
+                self.scope = nn.Linear(300*2, config.num_labels)
+        
         self.init_weights()
     
     def forward(
@@ -120,7 +129,9 @@ class ScopeBert(BertPreTrainedModel):
         """
         #return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         return_dict = False
-
+        if not param.augment_cue:
+            cues = input_ids[1]
+            input_ids = input_ids[0]
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
@@ -134,9 +145,16 @@ class ScopeBert(BertPreTrainedModel):
         )
 
         sequence_output = outputs[0]
-
+        if not param.augment_cue:
+            # Append the cue embedding to the BERT output
+            ### Alternative way: concat at input to form doubled length input
+            sequence_output = torch.cat([sequence_output, cues.unsqueeze(-1)], 2)
         sequence_output = self.dropout(sequence_output)
-        logits = self.scope(sequence_output)
+        if param.augment_cue:
+            logits = self.scope(sequence_output)
+        else:
+            logits = self.lstm(sequence_output)
+            logits = self.scope(logits[0])
 
         loss = None
         if labels is not None:
@@ -153,7 +171,7 @@ class ScopeBert(BertPreTrainedModel):
             return ((loss,) + output) if loss is not None else output
 
 class BiaffineClassifier(nn.Module):
-    def __init__(self, emb_dim, hid_dim, output_dim=param.label_dim, dropout=0.2):
+    def __init__(self, emb_dim, hid_dim, output_dim=param.label_dim, dropout=0.33):
         super().__init__()
         self.dep = nn.Linear(emb_dim, hid_dim)
         self.head = nn.Linear(emb_dim, hid_dim)
@@ -161,10 +179,7 @@ class BiaffineClassifier(nn.Module):
         self.dropout = nn.Dropout()
         #self.biaffine = nn.Bilinear(hid_dim, hid_dim, output_dim)
         self.biaffine = PairwiseBiaffine(hid_dim, hid_dim, output_dim)
-        self.decoder = nn.Linear(param.max_len*param.max_len, param.max_len)
         self.output_dim = output_dim
-        nn.init.xavier_normal_(self.dep.weight)
-        nn.init.xavier_normal_(self.head.weight)
     
     def forward(self, embedding):
         bs = embedding.size(0)
@@ -190,7 +205,6 @@ class PairwiseBilinear(nn.Module):
 
         self.weight = nn.Parameter(torch.zeros(input1_size, input2_size, output_size), requires_grad=True)
         self.bias = nn.Parameter(torch.zeros(output_size), requires_grad=True) if bias else 0
-        nn.init.xavier_normal_(self.weight)
 
     def forward(self, input1, input2):
         input1_size = list(input1.size())

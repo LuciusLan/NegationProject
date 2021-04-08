@@ -1,6 +1,7 @@
 import time
 import os
 import random
+from typing import List
 from collections import Counter
 import torch
 from torch.nn.utils import clip_grad_norm_
@@ -397,13 +398,16 @@ class ScopeTrainer(object):
         wrap_scope_pred = []
         wrap_scope_tar = []
         for step, f in enumerate(data_features):
-            input_lens = f[3]
             num_labels = param.label_dim
             input_ids = f[0].to(self.device)
             padding_mask = f[1].to(self.device)
-            subword_mask = f[6].to(self.device)
             scopes = f[2].to(self.device)
+            input_lens = f[3]
+            cues = f[4].to(self.device)
+            subword_mask = f[6].to(self.device)
             bs = f[0].size(0)
+            if param.matrix:
+                scopes_matrix = f[-1].to(self.device)
             self.model.eval()
             with torch.no_grad():
                 active_padding_mask = padding_mask.view(-1) == 1
@@ -417,13 +421,18 @@ class ScopeTrainer(object):
                         pad_matrix.append(mat)
                     pad_matrix = torch.stack(pad_matrix, 0)
                     active_padding_mask = pad_matrix.view(bs, -1) == 1
-
-                    scope_logits = self.model(input_ids, padding_mask)[0]
+                    if not param.augment_cue:
+                        scope_logits = self.model([input_ids, cues], padding_mask)[0]
+                    else:
+                        scope_logits = self.model(input_ids, padding_mask)[0]
                     logits_mask = scope_logits.view(bs, -1, num_labels)[active_padding_mask]
-                    target_mask = scopes.view(bs, -1)[active_padding_mask]
+                    target_mask = scopes_matrix.view(bs, -1)[active_padding_mask]
                     loss = self.criterion(logits_mask, target_mask)
                 else:
-                    scope_logits = self.model(input_ids, padding_mask)[0]
+                    if not param.augment_cue:
+                        scope_logits = self.model([input_ids, cues], padding_mask)[0]
+                    else:
+                        scope_logits = self.model(input_ids, padding_mask)[0]
                     active_padding_mask = padding_mask.view(-1) == 1
                     loss = self.criterion(scope_logits.view(-1, num_labels)[active_padding_mask.view(-1)], scopes.view(-1)[active_padding_mask.view(-1)])
             valid_loss.update(val=loss.item(), n=input_ids.size(0))
@@ -433,13 +442,11 @@ class ScopeTrainer(object):
                 ### TODO:
                 ### decode the adjacency matrix to the scope sequence for standardized evaluation
                 if param.matrix:
-                    tmp_scope_pred = util.matrix_decode_toseq(scope_logits, pad_matrix)
-                    tmp_scope_tar = util.matrix_decode_toseq(scopes, pad_matrix, False)
-                    
+                    tmp_scope_pred = util.matrix_decode_toseq(scope_logits, pad_matrix)                    
                     scope_pred = []
                     scope_tar = []
                     for i in range(bs):
-                        pred, tar = pack_subword_pred(tmp_scope_pred[i].detach().cpu().unsqueeze(0), tmp_scope_tar[i].detach().cpu().unsqueeze(0), subword_mask[i].detach().cpu().unsqueeze(0), padding_mask[i].cpu().unsqueeze(0))
+                        pred, tar = pack_subword_pred(tmp_scope_pred[i].detach().cpu().unsqueeze(0), scopes[i].detach().cpu().unsqueeze(0), subword_mask[i].detach().cpu().unsqueeze(0), padding_mask[i].cpu().unsqueeze(0))
                         scope_pred.append(pred[0])
                         scope_tar.append(tar[0])
                 else:
@@ -456,6 +463,10 @@ class ScopeTrainer(object):
 
             pbar.update()
             pbar.set_postfix({'loss': loss.item()})
+        if (param.mark_cue or param.matrix) and ('bioscope' in param.dataset_name or 'sfu' in param.dataset_name):
+            # For bioscope and sfu, include "cue" into scope if predicting cue
+            wrap_scope_tar = [1 if e == 3 else e for e in wrap_scope_tar]
+            wrap_scope_pred = [1 if e == 3 else e for e in wrap_scope_pred]
         scope_val_info = classification_report(wrap_scope_tar, wrap_scope_pred, output_dict=True, digits=5)
         if 'cuda' in str(self.device):
             torch.cuda.empty_cache()
@@ -468,7 +479,10 @@ class ScopeTrainer(object):
         for step, batch in enumerate(data_loader):
             self.model.train()
             batch = tuple(t.to(self.device) for t in batch)
-            input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask = batch
+            if param.matrix:
+                input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask, scopes_matrix = batch
+            else:
+                input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask = batch
             bs = batch[0].size(0)
             active_padding_mask = padding_mask.view(-1) == 1
             if param.matrix:
@@ -481,13 +495,18 @@ class ScopeTrainer(object):
                     pad_matrix.append(mat)
                 pad_matrix = torch.stack(pad_matrix, 0)
                 active_padding_mask = pad_matrix.view(-1) == 1
-
-                scope_logits = self.model(input_ids, padding_mask)[0]
+                if not param.augment_cue:
+                    scope_logits = self.model([input_ids, cues], padding_mask)[0]
+                else:
+                    scope_logits = self.model(input_ids, padding_mask)[0]
                 logits_mask = scope_logits.view(-1, num_labels)[active_padding_mask]
-                target_mask = scopes.view(-1)[active_padding_mask]
+                target_mask = scopes_matrix.view(-1)[active_padding_mask]
                 loss = self.criterion(logits_mask, target_mask)
             else:
-                scope_logits = self.model(input_ids, padding_mask)[0]
+                if not param.augment_cue:
+                    scope_logits = self.model([input_ids, cues], padding_mask)[0]
+                else:
+                    scope_logits = self.model(input_ids, padding_mask)[0]
                 loss = self.criterion(scope_logits.view(-1, num_labels)[active_padding_mask], scopes.view(-1)[active_padding_mask])
 
             #if len(self.n_gpu.split(",")) >= 2:
@@ -518,11 +537,7 @@ class ScopeTrainer(object):
             self.logger.info(f"Epoch {epoch}/{int(epochs)}")
             train_log = self.train_epoch(train_data, valid_data)
             scope_log = self.valid_epoch(valid_data, is_bert)
-
-            if not param.bioes:
-                scope_f1 = target_weight_score(scope_log, ['1'])
-            else:
-                scope_f1 = target_weight_score(scope_log, ['1', '2', '3', '4'])
+            scope_f1 = target_weight_score(scope_log, ['1'])
             logs = {'loss': train_log['loss'], 'val_scope_token_f1': scope_f1[0]}
             #logs = dict(train_log, **cue_log['weighted avg'], **cue_sep_log['weighted avg'])
             #show_info = f'Epoch: {epoch} - ' + "-".join([f' {key}: {value:.4f} ' for key, value in logs.items()])

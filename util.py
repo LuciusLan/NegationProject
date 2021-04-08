@@ -159,7 +159,7 @@ def pad_sequences(sequences, maxlen=None, dtype='int32',
             raise ValueError('Padding type "%s" not understood' % padding)
     return x
 
-def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=True, mode='col'):
+def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=True, mode='row'):
     """
     Decode the link-matrix to a prediction sequence (single cue case)
     Assumed single cue (multiword cue included), and high quality prediction. 
@@ -169,10 +169,11 @@ def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=T
         logits(Tensor): [batch_size, seq_length, seq_length, num_classes]
         pad(List[Tensor]): padding matrix
         isLogit(boolean): drop a dimension when input is target (isLogit=False)
-        mode: ('row', 'col', 'mean') rule to select target sequence. 
+        mode: ('row', 'col', 'max', 'mean') rule to select target sequence. 
             row: return the first row containing a cue
             col: return the first column containing a cue
-            mean: returan the mean of the all candidates.
+            max: return the max among all candidates.
+            mean: return the mean of all candidates
     Retruns:
         target_seq(Tensor): [batch_size, seq_length, num_classes]
     """
@@ -221,18 +222,53 @@ def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=T
     for i, m in enumerate(mat_tmp):
         rp, cp = pos_first_cue_row(m)
         if mode == 'row':
-            pred_scopes.append(batch[i][rp])
+            tmp = []
+            rows, cols = all_cue_pos(mat_tmp[i])
+            if len(rows) == 0 and len(cols) == 0:
+                tmp.append(batch[i][0])
+                tmp.append(batch[i][1])
+            else:
+                for ri in rows:
+                    tmp.append(batch[i][ri])
+            tmp = torch.stack(tmp)
+            if islogit:
+                pred_scopes.append(tmp.mean(0))
+            else:
+                pred_scopes.append(tmp.float().mean(0).long()) 
         elif mode == 'col':
             pred_scopes.append(batch[i][:][cp])
+        elif mode == 'max':
+            tmp = []
+            rows, cols = all_cue_pos(mat_tmp[i])
+            if len(rows) == 0 and len(cols) == 0:
+                tmp.append(batch[i][0])
+                tmp.append(batch[i][1])
+            else:
+                for ri in rows:
+                    tmp.append(batch[i][ri])
+                for ci in cols:
+                    tmp.append(batch[i][:][ci])
+            tmp = torch.stack(tmp)
+            if islogit:
+                pred_scopes.append(tmp.max(0).values)
+            else:
+                pred_scopes.append(tmp.float().max(0).values.long())
         elif mode == 'mean':
             tmp = []
             rows, cols = all_cue_pos(mat_tmp[i])
-            for ri in rows:
-                tmp.append(batch[i][ri])
-            for ci in cols:
-                tmp.append(batch[i][:][ci])
+            if len(rows) == 0 and len(cols) == 0:
+                tmp.append(batch[i][0])
+                tmp.append(batch[i][1])
+            else:
+                for ri in rows:
+                    tmp.append(batch[i][ri])
+                for ci in cols:
+                    tmp.append(batch[i][:][ci])
             tmp = torch.stack(tmp)
-            pred_scopes.append(tmp.mean(0))
+            if islogit:
+                pred_scopes.append(tmp.mean(0))
+            else:
+                pred_scopes.append(tmp.float().mean(0).long())              
     return pred_scopes
 
 def pack_subword_pred(logits, targets, subword_mask, padding_mask) -> Tuple[T, T]:
