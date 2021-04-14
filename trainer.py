@@ -372,9 +372,10 @@ class ScopeTrainer(object):
         #self.id2label = {y: x for x, y in label2id.items()}
         self.start_epoch = 1
         self.global_step = 0
+        self.arc_loss = torch.nn.BCELoss()
         if resume_path:
             self.logger.info(f"\nLoading checkpoint: {resume_path}")
-            resume_dict = torch.load(resume_path + '\\checkpoint_info.bin')
+            resume_dict = torch.load(resume_path + '/checkpoint_info.bin')
             best = resume_dict['epoch']
             self.start_epoch = resume_dict['epoch']
             if self.model_checkpoint:
@@ -408,6 +409,8 @@ class ScopeTrainer(object):
             bs = f[0].size(0)
             if param.matrix:
                 scopes_matrix = f[-1].to(self.device)
+            if param.dataset_name == 'sherlock':
+                eval_scopes = f[7].to(self.device)
             self.model.eval()
             with torch.no_grad():
                 active_padding_mask = padding_mask.view(-1) == 1
@@ -420,14 +423,28 @@ class ScopeTrainer(object):
                         mat = tmp * tmp_t
                         pad_matrix.append(mat)
                     pad_matrix = torch.stack(pad_matrix, 0)
-                    active_padding_mask = pad_matrix.view(bs, -1) == 1
+                    active_padding_mask = pad_matrix.view(-1) == 1
                     if not param.augment_cue:
                         scope_logits = self.model([input_ids, cues], padding_mask)[0]
                     else:
                         scope_logits = self.model(input_ids, padding_mask)[0]
-                    logits_mask = scope_logits.view(bs, -1, num_labels)[active_padding_mask]
-                    target_mask = scopes_matrix.view(bs, -1)[active_padding_mask]
-                    loss = self.criterion(logits_mask, target_mask)
+                    
+                    if param.fact:
+                        # Factorized (arc and label classifier)
+                        arc_targets = util.label_to_arc_matrix(scopes_matrix)
+                        arc_logits, label_logits = scope_logits
+                        arc_logit_masked = arc_logits.view(-1)[active_padding_mask]
+                        arc_target_masked = arc_targets.view(-1)[active_padding_mask]
+                        arc_mask = arc_logits.view(-1) > 0
+                        label_logit_masked = label_logits.view(-1, num_labels)[arc_mask]
+                        label_target_masked = scopes_matrix.view(-1)[arc_mask]
+                        arc_loss = self.arc_loss(arc_logit_masked, arc_target_masked.float())
+                        label_loss = self.criterion(label_logit_masked, label_target_masked)
+                        loss = arc_loss + label_loss
+                    else:
+                        logits_masked = scope_logits.view(-1, num_labels)[active_padding_mask]
+                        target_masked = scopes_matrix.view(-1)[active_padding_mask]
+                        loss = self.criterion(logits_masked, target_masked)
                 else:
                     if not param.augment_cue:
                         scope_logits = self.model([input_ids, cues], padding_mask)[0]
@@ -442,7 +459,8 @@ class ScopeTrainer(object):
                 ### TODO:
                 ### decode the adjacency matrix to the scope sequence for standardized evaluation
                 if param.matrix:
-                    tmp_scope_pred = util.matrix_decode_toseq(scope_logits, pad_matrix)                    
+                    label_logits = scope_logits[1] if param.fact else scope_logits
+                    tmp_scope_pred = util.matrix_decode_toseq(label_logits, pad_matrix)                    
                     scope_pred = []
                     scope_tar = []
                     for i in range(bs):
@@ -479,10 +497,16 @@ class ScopeTrainer(object):
         for step, batch in enumerate(data_loader):
             self.model.train()
             batch = tuple(t.to(self.device) for t in batch)
-            if param.matrix:
-                input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask, scopes_matrix = batch
+            if param.dataset_name == 'sherlock':
+                if param.matrix:
+                    input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask, eval_scopes, scopes_matrix = batch
+                else:
+                    input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask, eval_scopes = batch
             else:
-                input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask = batch
+                if param.matrix:
+                    input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask, scopes_matrix = batch
+                else:
+                    input_ids, padding_mask, scopes, input_len, cues, segments, subword_mask = batch
             bs = batch[0].size(0)
             active_padding_mask = padding_mask.view(-1) == 1
             if param.matrix:
@@ -498,10 +522,26 @@ class ScopeTrainer(object):
                 if not param.augment_cue:
                     scope_logits = self.model([input_ids, cues], padding_mask)[0]
                 else:
+                    #util.label_to_arc_matrix(scopes_matrix)
                     scope_logits = self.model(input_ids, padding_mask)[0]
-                logits_mask = scope_logits.view(-1, num_labels)[active_padding_mask]
-                target_mask = scopes_matrix.view(-1)[active_padding_mask]
-                loss = self.criterion(logits_mask, target_mask)
+                
+                if param.fact:
+                    # Factorized (arc and label classifier)
+                    arc_targets = util.label_to_arc_matrix(scopes_matrix)
+                    arc_logits, label_logits = scope_logits
+                    arc_logit_masked = arc_logits.view(-1)[active_padding_mask]
+                    arc_target_masked = arc_targets.view(-1)[active_padding_mask]
+                    arc_mask = arc_logits.view(-1) > 0
+                    label_logit_masked = label_logits.view(-1, num_labels)[arc_mask]
+                    label_target_masked = scopes_matrix.view(-1)[arc_mask]
+                    arc_loss = self.arc_loss(arc_logit_masked, arc_target_masked.float())
+                    label_loss = self.criterion(label_logit_masked, label_target_masked)
+                    loss = arc_loss + label_loss
+                else:
+                    # Unfactorized (Single classifier for both arc and label)
+                    logits_masked = scope_logits.view(-1, num_labels)[active_padding_mask]
+                    target_masked = scopes_matrix.view(-1)[active_padding_mask]
+                    loss = self.criterion(logits_masked, target_masked)
             else:
                 if not param.augment_cue:
                     scope_logits = self.model([input_ids, cues], padding_mask)[0]

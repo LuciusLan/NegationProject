@@ -91,10 +91,14 @@ class ScopeBert(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.bert = BertModel(config, add_pooling_layer=False)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.dropout = nn.Dropout(0.5)
         if param.matrix:
             if param.augment_cue:
-                self.scope = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
+                if param.fact:
+                    self.scope = nn.ModuleList([BiaffineClassifier(config.hidden_size, 1024, output_dim=1), 
+                                                BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)])
+                else:
+                    self.scope = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
             else:
                 self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
                 self.scope = BiaffineClassifier(300*2, 1024, output_dim=config.num_labels)
@@ -104,7 +108,7 @@ class ScopeBert(BertPreTrainedModel):
             else:
                 self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
                 self.scope = nn.Linear(300*2, config.num_labels)
-        
+        self.sigm = nn.Sigmoid()
         self.init_weights()
     
     def forward(
@@ -151,7 +155,12 @@ class ScopeBert(BertPreTrainedModel):
             sequence_output = torch.cat([sequence_output, cues.unsqueeze(-1)], 2)
         sequence_output = self.dropout(sequence_output)
         if param.augment_cue:
-            logits = self.scope(sequence_output)
+            if param.fact:
+                arc_logits = self.sigm(self.scope[0](sequence_output))
+                label_logits = self.scope[1](sequence_output)
+                logits = [arc_logits, label_logits]
+            else:
+                logits = self.scope(sequence_output)
         else:
             logits = self.lstm(sequence_output)
             logits = self.scope(logits[0])
@@ -176,7 +185,7 @@ class BiaffineClassifier(nn.Module):
         self.dep = nn.Linear(emb_dim, hid_dim)
         self.head = nn.Linear(emb_dim, hid_dim)
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout()
+        self.dropout = nn.Dropout(dropout)
         #self.biaffine = nn.Bilinear(hid_dim, hid_dim, output_dim)
         self.biaffine = PairwiseBiaffine(hid_dim, hid_dim, output_dim)
         self.output_dim = output_dim

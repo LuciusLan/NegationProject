@@ -159,6 +159,13 @@ def pad_sequences(sequences, maxlen=None, dtype='int32',
             raise ValueError('Padding type "%s" not understood' % padding)
     return x
 
+def label_to_arc_matrix(mat: torch.Tensor) -> torch.Tensor:
+    zero = torch.zeros_like(mat)
+    one = torch.ones_like(mat)
+    tmp = torch.where(mat != 3, mat, one)
+    tmp = torch.where(tmp == 1, tmp, zero)
+    return tmp
+
 def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=True, mode='row'):
     """
     Decode the link-matrix to a prediction sequence (single cue case)
