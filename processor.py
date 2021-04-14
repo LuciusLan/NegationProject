@@ -46,8 +46,36 @@ class ScopeExample(InputExample):
         if segments is not None:
             self.segments = segments
 
+class SherScopeExample(ScopeExample):
+    def __init__(self, example):
+        super().__init__(guid=example.guid, sent=example.sent, subword_mask=example.subword_mask,
+                         cues=example.cues, scopes=example.scopes, sc_sent=example.sc_sent, segments=example.segments)
+        self.scope_eval = self.scopes
+        self.cue_eval = self.cues
+        self.cues, self.scopes, self.sc_sent = self.combine_nt(self.cues, self.scopes, self.sc_sent)
+    
+    def combine_nt(self, cues, scopes, sc_sent):
+        if 'n\'t' in sc_sent[0]:
+            num_cues = len(cues)
+            new_cues = [[] for i in range(num_cues)]
+            new_scopes = [[] for i in range(num_cues)]
+            new_sc_sent = [[] for i in range(num_cues)]
+            for i, (cue, scope, sent) in enumerate(zip(cues, scopes, sc_sent)):
+                for c, s, token in zip(cue, scope, sent):
+                    if token != 'n\'t':
+                        new_cues[i].append(c)
+                        new_scopes[i].append(s)
+                        new_sc_sent[i].append(token)
+                    else:
+                        new_cues[i][-1] = c
+                        new_scopes[i][-1] = s
+                        new_sc_sent[i][-1] += token
+            return new_cues, new_scopes, new_sc_sent
+        else:
+            return cues, scopes, sc_sent
 
-ExampleLike = Union[CueExample, ScopeExample, InputExample]
+
+ExampleLike = Union[CueExample, ScopeExample, InputExample, SherScopeExample]
 
 
 class CueFeature():
@@ -78,6 +106,13 @@ class ScopeFeature(object):
         if segments is not None:
             self.segments = segments
 
+class SherScopeFeature(ScopeFeature):
+    def __init__(self, feat, eval_data):
+        super().__init__(guid=feat.guid, or_sent=feat.or_sent, sents=feat.sents, input_ids=feat.input_ids, 
+                         padding_mask=feat.padding_mask, subword_mask=feat.subword_mask, input_len=feat.input_len, 
+                         cues=feat.cues, scopes=feat.scopes, num_cues=feat.num_cues, segments=feat.segments)
+        self.scope_eval = eval_data.scope_eval
+        self.cue_eval = eval_data.cue_eval
 
 class PipelineScopeFeature(object):
     def __init__(self, guid, or_sent, sents, input_ids, padding_mask, subword_mask, input_len, cues, cue_match, gold_scopes, gold_num_cues):
@@ -94,7 +129,7 @@ class PipelineScopeFeature(object):
         self.gold_num_cues = gold_num_cues
 
 
-FeatureLike = Union[CueFeature, ScopeFeature, PipelineScopeFeature]
+FeatureLike = Union[CueFeature, ScopeFeature, SherScopeFeature, PipelineScopeFeature]
 bioes_to_id = {'<PAD>': 0, 'I': 1, 'O': 2, 'B': 3, 'E': 4, 'S': 5, 'C': 6}
 
 def scope_to_bioes(scope):
@@ -365,6 +400,18 @@ class Processor(object):
                 torch.save(te_non_cue_sents, f'{param.base_path}/split/ns_{cached_file}')
             return (train_cue, dev_cue, test_cue), (train_scope, dev_scope, test_scope)
 
+    def combine_sher_ex(self, data: List[ExampleLike]) -> List[ExampleLike]:
+        tmp_data = []
+        for item in data:
+            tmp_data.append(SherScopeExample(item))
+        return tmp_data
+    
+    def combine_sher_fe(self, data, eval_data):
+        tmp_data = []
+        for item, ev in zip(data, eval_data):
+            tmp_data.append(SherScopeFeature(item, ev))
+        return tmp_data
+
     def load_examples(self, file: str):
         """
         Load a pre-saved example binary file. Or anything else.
@@ -474,36 +521,19 @@ class Processor(object):
                         temp_mask = []
                         temp_seg = []
                         for word, cue, scope, seg in zip(sent, cues, scopes, segments):
-                            if '<AFF>' not in word:
-                                # Deal with affix cue. (manually)
-                                subwords = self.tokenizer.tokenize(word)
-                                for count, subword in enumerate(subwords):
-                                    mask = 1
-                                    if count > 0:
-                                        mask = 0
-                                    temp_mask.append(mask)
-                                    if param.ignore_multiword_cue:
-                                        if cue == 2:
-                                            cue = 1
-                                    temp_cues.append(cue)
-                                    temp_scope.append(scope)
-                                    temp_sent.append(subword)
-                                    temp_seg.append(seg)
-                            else:
-                                word = word[5:]
-                                subwords = self.tokenizer.tokenize(word)
-                                for count, subword in enumerate(subwords):
+                            subwords = self.tokenizer.tokenize(word)
+                            for count, subword in enumerate(subwords):
+                                mask = 1
+                                if count > 0:
                                     mask = 0
-                                    if count > 0:
-                                        mask = 0
-                                    temp_mask.append(mask)
-                                    temp_cues.append(cue)
-                                    temp_scope.append(scope)
-                                    temp_seg.append(seg)
-                                    if count != 0:
-                                        temp_sent.append(subword)
-                                    else:
-                                        temp_sent.append("##"+subword)
+                                temp_mask.append(mask)
+                                if param.ignore_multiword_cue:
+                                    if cue == 2:
+                                        cue = 1
+                                temp_cues.append(cue)
+                                temp_scope.append(scope)
+                                temp_sent.append(subword)
+                                temp_seg.append(seg)
                         new_text = []
                         new_cues = []
                         new_scopes = []
@@ -950,6 +980,7 @@ class Processor(object):
                 input_len = []
                 segments = []
                 cues = []
+                eval_scopes = []
                 for feature in features:
                     for cue_i in range(feature.num_cues):
                         input_ids.append(feature.input_ids[cue_i])
@@ -959,6 +990,8 @@ class Processor(object):
                         input_len.append(feature.input_len[cue_i])
                         segments.append(feature.segments[cue_i])
                         cues.append(feature.cues[cue_i])
+                        if param.dataset_name == 'sherlock':
+                            eval_scopes.append(feature.scope_eval[cue_i])
 
                 input_ids = pad_sequences(input_ids,
                                           maxlen=param.max_len, value=0, padding="post",
@@ -988,10 +1021,20 @@ class Processor(object):
                 segments = torch.LongTensor(segments)
                 subword_masks = torch.LongTensor(subword_mask)
                 scopes_matrix = self.scope_to_matrix(scopes, cues, input_len)
-                if param.matrix:
-                    return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks, scopes_matrix)
+                if param.dataset_name == 'sherlock':
+                    eval_scopes = pad_sequences(eval_scopes,
+                                             maxlen=param.max_len, value=0, padding="post",
+                                             dtype="long", truncating="post").tolist()
+                    eval_scopes = torch.LongTensor(eval_scopes)
+                    if param.matrix:
+                        return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks, eval_scopes, scopes_matrix)
+                    else:
+                        return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks, eval_scopes)
                 else:
-                    return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks)
+                    if param.matrix:
+                        return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks, scopes_matrix)
+                    else:
+                        return TensorDataset(input_ids, padding_mask, scopes, input_len, segments, cues, subword_masks)
             else:
                 input_ids = []
                 padding_mask = []

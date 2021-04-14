@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,7 +18,6 @@ from model_bert import CueBert, ScopeBert
 from optimizer import BertAdam, BERTReduceLROnPlateau, ASLSingleLabel
 from util import TrainingMonitor, ModelCheckpoint, EarlyStopping, global_logger
 from params import param
-
 rouge = Rouge()
 device = torch.device("cuda")
 
@@ -128,6 +128,7 @@ if param.task == 'cue':
 
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
+        proc.tokenizer.add_special_tokens('[NEG]')
     else:
         proc.get_tokenizer(data=train_data, is_bert=False)
 
@@ -190,6 +191,9 @@ elif param.task == 'scope':
             dev_raw, cue_or_scope='scope', example_type='dev', dataset_name='sherlock')
         test_data = proc.create_examples(
             test_raw, cue_or_scope='scope', example_type='test', dataset_name='sherlock')
+        train_data = proc.combine_sher_ex(train_data)
+        dev_data = proc.combine_sher_ex(dev_data)
+        test_data = proc.combine_sher_ex(test_data)
 
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
@@ -213,6 +217,11 @@ elif param.task == 'scope':
         dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
     test_feature = proc.create_features(
         test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+    
+    if param.dataset_name == 'sherlock':
+        train_feature = proc.combine_sher_fe(train_feature, train_data)
+        dev_feature = proc.combine_sher_fe(dev_feature, dev_data)
+        test_feature = proc.combine_sher_fe(test_feature, test_data)
 
     train_ds = proc.create_dataset(
         train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
@@ -220,6 +229,8 @@ elif param.task == 'scope':
         dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
     test_ds = proc.create_dataset(
         test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
+
+    
 elif param.task == 'pipeline':
     if param.dataset_name == 'sfu':
         cue_train_data = proc.load_examples(
@@ -410,7 +421,7 @@ for run in range(param.num_runs):
     elif param.task == 'scope':
         model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', 
                                            monitor='val_scope_token_f1', mode='max', arch=param.model_name,
-                                           best=best_f)
+                                           best=None)
         early_stopping = EarlyStopping(patience=10, monitor='val_scope_token_f1', mode='max')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,
@@ -435,13 +446,34 @@ for run in range(param.num_runs):
         else:
             cue_test_info = trainer.test_epoch(test_dl, is_bert=param.is_bert)
         f1 = target_weight_score(cue_test_info, ['0', '1', '2'])
-    elif param.task == 'scope':  
+    elif param.task == 'scope':
+        """resume_path = os.path.join('/home/wu/Project/model_chk', param.model_name)
+        del model
+        model = ScopeBert.from_pretrained(resume_path).to(device)
+        trainer = ScopeTrainer(n_gpu=1,
+                               model=model,
+                               logger=global_logger,
+                               optimizer=optimizer,
+                               lr_scheduler=lr_scheduler,
+                               label2id=None,
+                               criterion=criterion,
+                               training_monitor=train_monitor,
+                               model_checkpoint=model_checkpoint,
+                               resume_path=resume_path,
+                               grad_clip=5.0,
+                               gradient_accumulation_steps=1,
+                               early_stopping=early_stopping
+                               )
+        tmp = trainer.valid_epoch(dev_dl, is_bert=param.is_bert)
+        tmp_f1 = target_weight_score(tmp, ['1'])
+        global_logger.info(tmp_f1)"""
         scope_val_info = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
         f1 = target_weight_score(scope_val_info, ['1'])
         global_logger.info(f1)
         if f1[0] > best_f:
             best_f = f1[0]
         all_f1.append(f1[0])
+        del model
     """
     model = ScopeRNN(vocab_size=tokenizer.dictionary.__len__(), tokenizer=tokenizer)
     model.to(device)
