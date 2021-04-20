@@ -185,6 +185,7 @@ def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=T
         target_seq(Tensor): [batch_size, seq_length, num_classes]
     """
     bs = logits.size(0)
+    num_labels = logits.size(-1)
     padding_mask = pad == 1
     if islogit:
         batch = []
@@ -216,18 +217,22 @@ def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=T
     def all_cue_pos(mat):
         rp = []
         cp = []
-        for row_i, row_e in enumerate(mat):
-            for col_i, col_e in enumerate(row_e):
-                if col_e == 3:
-                    rp.append(row_i)
-                    cp.append(col_i)
+        if param.cue_mode == 'diag':
+            for row_i, row_e in enumerate(mat):
+                for col_i, col_e in enumerate(row_e):
+                    if col_e == 3:
+                        rp.append(row_i)
+                        cp.append(col_i)
+        elif param.cue_mode == 'root':
+            for i, e in enumerate(mat[0]):
+                if e == 1:
+                    rp.append(i)
         rp = list(set(rp))
         cp = list(set(cp))
         return rp, cp
                 
     pred_scopes = []
     for i, m in enumerate(mat_tmp):
-        rp, cp = pos_first_cue_row(m)
         if mode == 'row':
             tmp = []
             rows, cols = all_cue_pos(mat_tmp[i])
@@ -239,10 +244,20 @@ def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=T
                     tmp.append(batch[i][ri])
             tmp = torch.stack(tmp)
             if islogit:
-                pred_scopes.append(tmp.mean(0))
+                curr_pred = tmp.mean(0)
+                if param.cue_mode == 'root' and len(rows) != 0:
+                    # Force the predicted scope tensor's cue position to be decoding to cue
+                    mock_cue = [0 for i in range(num_labels+1)]
+                    mock_cue[3] = 1
+                    mock_cue = torch.Tensor(mock_cue).to(curr_pred.device)
+                    z = torch.zeros([curr_pred.size(0),1]).to(curr_pred.device)
+                    curr_pred = torch.cat([curr_pred, z], 1)
+                    curr_pred[rows] = mock_cue
+                pred_scopes.append(curr_pred)
             else:
-                pred_scopes.append(tmp.float().mean(0).long()) 
+                pred_scopes.append(tmp.float().mean(0).long())
         elif mode == 'col':
+            rp, cp = pos_first_cue_row(m)
             pred_scopes.append(batch[i][:][cp])
         elif mode == 'max':
             tmp = []
@@ -338,8 +353,55 @@ def pack_subword_pred(logits, targets, subword_mask, padding_mask) -> Tuple[T, T
 
     return actual_logits, actual_label_ids
 
-def drop_padding(sequences):
-    pass
+def postprocess_sher(input_id, scope_pred, cue, subword_mask, input_len, text_seq, text_string):
+    new_pred = scope_pred
+    packed_text = pack_subword_text(text_seq, subword_mask, input_len)
+    if 'n\'t' in text_string:
+        for i, word in enumerate(packed_text):
+            if 'n\'t' in word:
+                if scope_pred[i] == 3:
+                    # if n't word appears and classified as cue, mark the root as scope
+                    new_pred.insert(i, 1)
+                else:
+                    # if not cue, simply split it
+                    new_pred.insert(i, scope_pred[i])
+    if 4 in cue:
+        packed_cue = pack_subword_text(cue, subword_mask, input_len)
+        for i, c in enumerate(packed_cue):
+            if c == 4:
+                # for affixal cue, mark it as part of scope, to simulate separation of affixes 
+                # (root being scope, affix being cue)
+                new_pred[i] = 1
+    return new_pred
+
+
+def pack_subword_text(seq, subword_mask, input_len) -> Tuple[T, T]:
+    """
+    Apply subword mask to restore the original sentence and labels
+
+    Params:
+        seq (List[str|int]): text list 
+        subword_mask (Tensor | List): subword mask array
+        input_len: length of the input sequence (indicating the padding margin)
+    
+    Retruns:
+        
+    """
+    subword_mask = subword_mask.tolist()
+    input_len = input_len.tolist()
+    new_seq = []
+    for i , (e, sub) in enumerate(zip(seq, subword_mask)):
+        if i >= input_len:
+            break
+        if sub == 1:
+            new_seq.append(e)
+        elif sub == 0:
+            if type(e) == str:
+                new_seq[-1] += e
+            elif type(e) == int:
+                continue
+
+    return new_seq
 
 def pack_subword(seq, subword_mask) -> Tuple[T, T]:
     """

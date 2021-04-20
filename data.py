@@ -5,7 +5,7 @@ from typing import List, Tuple, T, Iterable, Union, NewType
 from params import param
 
 
-cue_id2label = {0: 'Affix', 1: 'Cue', 2: 'MCue', 3: 'O'}
+cue_id2label = {4: 'Affix', 1: 'Cue', 2: 'MultiWordCue', 3: 'O'}
 cue_label2id = {0: 0, 1: 1, 2: 2, 3: 3}
 scope_id2label = {0: '<PAD>', 1: 'I', 2:'O', 3: 'C', 4: 'B', 5: 'E', 6: 'S'}
 
@@ -117,7 +117,7 @@ def sherlock(f_path) -> Tuple[List, List, List]:
             for i in range(num_cues):
                 if tokens[7 + 3 * i] != '_':  # Cue field is active
                     if tokens[8 + 3 * i] != '_':  # Check for affix
-                        label[0][-1] = 0  # Affix
+                        label[0][-1] = 4  # Affix
                         #affix_list.append(tokens[7 + 3 * i]) # pylint: disable=undefined-variable
                         if i != prev_cue_c:
                             cue_counter += 1
@@ -163,7 +163,7 @@ def sherlock(f_path) -> Tuple[List, List, List]:
                                     i] != '_':  # Cue field is active
                             if tokens[8 + 3 *
                                         i] != '_':  # Check for affix
-                                label[0][-1] = 0  # Affix
+                                label[0][-1] = 4  # Affix
                                 aflabel[0][-1] = 0
                                 aflabel[0].append(3)
                                 if i != prev_cue_c:
@@ -265,7 +265,11 @@ def sherlock(f_path) -> Tuple[List, List, List]:
     non_cue_cues = [i[1] for i in non_cue_data]
     non_cue_sep = [i[2] for i in non_cue_data]
     non_cue_num = [0 for i in non_cue_data]
-
+    if param.mark_cue:
+        for ci, c in enumerate(scope_cues):
+            for i, e in enumerate(c):
+                if e == 0 or e == 1 or e == 2:
+                    data_scope[ci][i] = 3
     sherlock_cues = (data + non_cue_sents, labels + non_cue_cues, cue_sep+non_cue_sep, num_cue_list+non_cue_num)
     sherlock_scopes = (or_sents, scope_sents, scope_cues, data_scope)
     

@@ -128,7 +128,8 @@ if param.task == 'cue':
 
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
-        proc.tokenizer.add_special_tokens('[NEG]')
+        new_special_tokens = {'additional_special_tokens': ['[NEG]', '[ROOT]']}
+        proc.tokenizer.add_special_tokens(new_special_tokens)
     else:
         proc.get_tokenizer(data=train_data, is_bert=False)
 
@@ -197,6 +198,8 @@ elif param.task == 'scope':
 
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
+        new_special_tokens = {'additional_special_tokens': ['[NEG]', '[ROOT]']}
+        proc.tokenizer.add_special_tokens(new_special_tokens)
     else:
         # For standalone scope model, the training vocab should be all training sentences,
         # but the scope train data only contains negation sents. Need to use cue data for a bigger dictionary
@@ -343,7 +346,9 @@ train_dl = DataLoader(train_ds, batch_size=param.batch_size, sampler=train_sp)
 dev_dl = DataLoader(dev_ds, batch_size=param.batch_size)
 test_dl = DataLoader(test_ds, batch_size=param.batch_size)
 tokenizer = proc.tokenizer
-
+train_dl.tokenizer = tokenizer
+dev_dl.tokenizer = tokenizer
+test_dl.tokenizer = tokenizer
 
 best_f = 0
 all_f1 = []
@@ -352,6 +357,7 @@ for run in range(param.num_runs):
     if param.task == 'cue':
         model = CueBert.from_pretrained(
             'bert-base-cased', cache_dir='bert_base_cased_model', num_labels=4)
+        model.resize_token_embeddings(len(tokenizer))
         model = model.to(device)
         bert_param_optimizer = list(model.bert.named_parameters())
         cue_fc_param_optimizer = list(model.cue.named_parameters())
@@ -375,6 +381,7 @@ for run in range(param.num_runs):
     elif param.task == 'scope':
         model = ScopeBert.from_pretrained(
             'bert-base-cased', cache_dir='bert_base_cased_model', num_labels=param.label_dim)
+        model.resize_token_embeddings(len(tokenizer))
         model = model.to(device)
         bert_param_optimizer = list(model.bert.named_parameters())
         scope_fc_param_optimizer = list(model.scope.named_parameters())
@@ -400,7 +407,7 @@ for run in range(param.num_runs):
     if param.use_ASL:
         criterion = ASLSingleLabel()
     else:
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(ignore_index=0)
     if param.task == 'cue':
         model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
         early_stopping = EarlyStopping(patience=10, monitor='val_cue_f1', mode='max')

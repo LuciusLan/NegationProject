@@ -409,15 +409,13 @@ class ScopeTrainer(object):
             bs = f[0].size(0)
             if param.matrix:
                 scopes_matrix = f[-1].to(self.device)
-            if param.dataset_name == 'sherlock':
-                eval_scopes = f[7].to(self.device)
             self.model.eval()
             with torch.no_grad():
                 active_padding_mask = padding_mask.view(-1) == 1
                 if param.matrix:
                     pad_matrix = []
                     for i in range(bs):
-                        tmp = padding_mask[i]
+                        tmp = padding_mask[i].clone()
                         tmp = tmp.view(param.max_len, 1)
                         tmp_t = tmp.transpose(0, 1)
                         mat = tmp * tmp_t
@@ -455,16 +453,14 @@ class ScopeTrainer(object):
             valid_loss.update(val=loss.item(), n=input_ids.size(0))
 
             if is_bert:
-                ###
-                ### TODO:
-                ### decode the adjacency matrix to the scope sequence for standardized evaluation
                 if param.matrix:
                     label_logits = scope_logits[1] if param.fact else scope_logits
                     tmp_scope_pred = util.matrix_decode_toseq(label_logits, pad_matrix)                    
                     scope_pred = []
                     scope_tar = []
                     for i in range(bs):
-                        pred, tar = pack_subword_pred(tmp_scope_pred[i].detach().cpu().unsqueeze(0), scopes[i].detach().cpu().unsqueeze(0), subword_mask[i].detach().cpu().unsqueeze(0), padding_mask[i].cpu().unsqueeze(0))
+                        pred, tar = pack_subword_pred(tmp_scope_pred[i].detach().cpu().unsqueeze(0), scopes[i].detach().cpu().unsqueeze(0),
+                                                      subword_mask[i].detach().cpu().unsqueeze(0), padding_mask[i].cpu().unsqueeze(0))
                         scope_pred.append(pred[0])
                         scope_tar.append(tar[0])
                 else:
@@ -474,10 +470,25 @@ class ScopeTrainer(object):
                 scope_pred = scope_logits.argmax()
                 scope_tar = scopes
 
-            for i1, sent in enumerate(scope_pred):
-                for i2, _ in enumerate(sent):
-                    wrap_scope_pred.append(scope_pred[i1][i2].tolist())
-                    wrap_scope_tar.append(scope_tar[i1][i2].tolist())
+            if param.dataset_name == 'sherlock':
+                # Post process for Sherlock, separate "n't" words and mark affixal cues
+                new_pred = []
+                new_tar = []
+                for i, seq in enumerate(input_ids):
+                    text_seq = data_features.tokenizer.convert_ids_to_tokens(seq)
+                    text_string = data_features.tokenizer.decode(seq)
+                    new_pred.append(util.postprocess_sher(seq, scope_pred[i], cues[i], subword_mask[i], input_lens[i], text_seq, text_string))
+                    new_tar.append(util.postprocess_sher(seq, scope_tar[i], cues[i], subword_mask[i], input_lens[i], text_seq, text_string))
+                
+                for i1, sent in enumerate(new_pred):
+                    for i2, _ in enumerate(sent):
+                        wrap_scope_pred.append(new_pred[i1][i2])
+                        wrap_scope_tar.append(new_tar[i1][i2])
+            else:
+                for i1, sent in enumerate(scope_pred):
+                    for i2, _ in enumerate(sent):
+                        wrap_scope_pred.append(scope_pred[i1][i2].tolist())
+                        wrap_scope_tar.append(scope_tar[i1][i2].tolist())
 
             pbar.update()
             pbar.set_postfix({'loss': loss.item()})
@@ -512,7 +523,7 @@ class ScopeTrainer(object):
             if param.matrix:
                 pad_matrix = []
                 for i in range(bs):
-                    tmp = padding_mask[i]
+                    tmp = padding_mask[i].clone()
                     tmp = tmp.view(param.max_len, 1)
                     tmp_t = tmp.transpose(0, 1)
                     mat = tmp * tmp_t
@@ -522,7 +533,6 @@ class ScopeTrainer(object):
                 if not param.augment_cue:
                     scope_logits = self.model([input_ids, cues], padding_mask)[0]
                 else:
-                    #util.label_to_arc_matrix(scopes_matrix)
                     scope_logits = self.model(input_ids, padding_mask)[0]
                 
                 if param.fact:
@@ -539,8 +549,8 @@ class ScopeTrainer(object):
                     loss = arc_loss + label_loss
                 else:
                     # Unfactorized (Single classifier for both arc and label)
-                    logits_masked = scope_logits.view(-1, num_labels)[active_padding_mask]
-                    target_masked = scopes_matrix.view(-1)[active_padding_mask]
+                    logits_masked = scope_logits.view(-1, num_labels)#[active_padding_mask]
+                    target_masked = scopes_matrix.view(-1)#[active_padding_mask]
                     loss = self.criterion(logits_masked, target_masked)
             else:
                 if not param.augment_cue:
