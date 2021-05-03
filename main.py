@@ -214,26 +214,36 @@ elif param.task == 'scope':
         dev_data = proc.scope_add_cue(dev_data)
         test_data = proc.scope_add_cue(test_data)
 
-    train_feature = proc.create_features(
-        train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    dev_feature = proc.create_features(
-        dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    test_feature = proc.create_features(
-        test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    
-    if param.dataset_name == 'sherlock':
-        train_feature = proc.combine_sher_fe(train_feature, train_data)
-        dev_feature = proc.combine_sher_fe(dev_feature, dev_data)
-        test_feature = proc.combine_sher_fe(test_feature, test_data)
+    if param.multi:
+        train_feature = proc.create_features_multi(
+            train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        dev_feature = proc.create_features_multi(
+            dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        test_feature = proc.create_features_multi(
+            test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        
+        train_ds = proc.create_dataset(
+            train_feature, cue_or_scope='multi', example_type='train', is_bert=param.is_bert)
+        dev_ds = proc.create_dataset(
+            dev_feature, cue_or_scope='multi', example_type='dev', is_bert=param.is_bert)
+        test_ds = proc.create_dataset(
+            test_feature, cue_or_scope='multi', example_type='test', is_bert=param.is_bert)
+    else:
+        train_feature = proc.create_features(
+            train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        dev_feature = proc.create_features(
+            dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        test_feature = proc.create_features(
+            test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
 
-    train_ds = proc.create_dataset(
-        train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
-    dev_ds = proc.create_dataset(
-        dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
-    test_ds = proc.create_dataset(
-        test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
+        train_ds = proc.create_dataset(
+            train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
+        dev_ds = proc.create_dataset(
+            dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
+        test_ds = proc.create_dataset(
+            test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
 
-    
+
 elif param.task == 'pipeline':
     if param.dataset_name == 'sfu':
         cue_train_data = proc.load_examples(
@@ -429,7 +439,7 @@ for run in range(param.num_runs):
         model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', 
                                            monitor='val_scope_token_f1', mode='max', arch=param.model_name,
                                            best=None)
-        early_stopping = EarlyStopping(patience=10, monitor='val_scope_token_f1', mode='max')
+        early_stopping = EarlyStopping(patience=5, monitor='val_scope_token_f1', mode='max')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,
                                logger=global_logger,

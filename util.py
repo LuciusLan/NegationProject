@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from pathlib import Path
 import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score, classification_report
 from params import param
 
 def save_json(data, file_path):
@@ -292,6 +293,93 @@ def matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], islogit=T
             else:
                 pred_scopes.append(tmp.float().mean(0).long())              
     return pred_scopes
+
+def multi_matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], cues: torch.Tensor=None):
+    bs = logits.size(0)
+    num_labels = logits.size(-1)
+    padding_mask = pad == 1
+    batch = []
+    for i in range(bs):
+        tmp = logits.view(bs, param.max_len, param.max_len, param.label_dim)[i][padding_mask[i]]
+        dim = int(math.sqrt(tmp.size(0)))
+        tmp = tmp.view(dim, dim, -1)
+        batch.append(tmp)
+    mat_tmp = [e.argmax(-1).tolist() for e in batch]
+
+    pred_scopes = []
+    if cues is None:
+        pred_cues = []
+        for i, mat in enumerate(mat_tmp):
+            stmp = []
+            ctmp = []
+            pos = []
+            for row_i, row_e in enumerate(mat):
+                for col_i, col_e in enumerate(row_e):
+                    if col_e == 3:
+                        pos.append(row_i)
+            if len(pos) == 0:
+                stmp.append(batch[i][0])
+                ctmp.append([0])
+            candidates = [mat[i]==1 for i in pos]
+            candidates = [e.argmax(-1) for e in candidates]
+            picked = filter_same_cue(candidates)
+            for e in picked:
+                if isinstance(e, list):
+                    stmp.append(batch[i][e[0]])
+                    ctmp.append(e)
+                else:
+                    stmp.append(batch[i][e])
+                    ctmp.append([e])
+            pred_scopes.append(stmp)
+            pred_cues.append(ctmp)
+    else:
+        pred_cues = None
+        
+    return pred_scopes, pred_cues
+        
+def filter_same_cue(candidates: List, thres=0.95):
+    """
+    Using Non-Maximum Suppression (NMS) to filter out highly similar scopes (that possibly belong to same cue)
+    """
+    pick = []
+    next_ = list(range(len(candidates)))
+    while len(next_) > 0:
+        last = next_[-1]
+        pick.append(last)
+        next_.pop(-1)
+        if len(next_) == 0:
+            break
+        for i in range(last):
+            f = f1_score(candidates[last], candidates[i])
+            if f > thres:
+                pick[-1] = [pick[-1], i]
+                next_.pop(i)
+    return pick
+
+def handle_eval_multi(scope_pred, scope_tar, cue_pred, cue_tar):
+    if len(scope_pred) == 1:
+        return [scope_pred], [scope_tar]
+    else:
+        cue_matches = []
+        for i, cp in enumerate(cue_pred):
+            match = -1
+            if isinstance(cp, list):
+                for j, cg in enumerate(cue_tar):
+                    for c in cp:
+                        if cg[c] == 1:
+                            match = j
+                cue_matches.append(match)
+        preds = []
+        tars = []
+        for i, cm in enumerate(cue_matches):
+            if cm == -1:
+                # Predicting non-existing cue, mark all predicted scope token as false positive
+                preds.append(scope_pred[i])
+                tars.append([2 for e in scope_pred[i]])
+            else:
+                preds.append(scope_pred[i])
+                tars.append(scope_tar[cm])
+        return preds, tars         
 
 def pack_subword_pred(logits, targets, subword_mask, padding_mask) -> Tuple[T, T]:
     """
