@@ -523,6 +523,7 @@ class Processor(object):
 
         if example_type.lower() in ('train', 'test', 'dev'):
             if cue_or_scope.lower() == 'cue':
+                cue_examples.extend(non_cue_examples)
                 if cached_file is not None:
                     print('Saving examples into cached file %s', cached_file)
                     torch.save(cue_examples, cached_file)
@@ -620,9 +621,9 @@ class Processor(object):
                 tr_nocue, de_nocue = train_test_split(tr_nocue_, test_size=(
                     val_size / (1 - test_size)), random_state=random_state2)
 
-                tr_nocue_s, te_nocue_s = train_test_split(
+                tr_nocue_s_, te_nocue_s = train_test_split(
                     non_cue_scopes, test_size=test_size, random_state=random_state)
-                tr_nocue_s, de_nocue_s = train_test_split(tr_nocue_, test_size=(
+                tr_nocue_s, de_nocue_s = train_test_split(tr_nocue_s_, test_size=(
                     val_size / (1 - test_size)), random_state=random_state2)
                 train_cue.extend(tr_nocue)
                 dev_cue.extend(de_nocue)
@@ -843,8 +844,8 @@ class Processor(object):
                     #assert all(each_len == len(words) for each_len in seq_len)
 
             feature = ScopeFeature(guid=guid, or_sent=example.sent, sents=wrap_sents, input_ids=wrap_input_id,
-                                    padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
-                                    input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes, num_cues=example.num_cues)
+                                   padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
+                                   input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes, num_cues=example.num_cues)
             features.append(feature)
         else:
             ## Cue
@@ -887,8 +888,8 @@ class Processor(object):
                 padding_mask = [1] * len(input_ids)
                 input_len = len(input_ids)
                 feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids,
-                                        padding_mask=padding_mask, subword_mask=subword_mask,
-                                        input_len=input_len, cues=new_cues, cue_sep=new_cuesep, num_cues=num_cues)
+                                     padding_mask=padding_mask, subword_mask=subword_mask,
+                                     input_len=input_len, cues=new_cues, cue_sep=new_cuesep, num_cues=num_cues)
             else:
                 # For non-BERT (non-BPE tokenization)
                 cues = example.cues
@@ -908,8 +909,8 @@ class Processor(object):
                 padding_mask = [1] * len(input_ids)
                 input_len = len(input_ids)
                 feature = CueFeature(guid=guid, sent=sent, input_ids=input_ids,
-                                        padding_mask=padding_mask, subword_mask=None,
-                                        input_len=input_len, cues=cues, cue_sep=cue_sep, num_cues=num_cues)
+                                     padding_mask=padding_mask, subword_mask=None,
+                                     input_len=input_len, cues=cues, cue_sep=cue_sep, num_cues=num_cues)
             features.append(feature)
 
         return features
