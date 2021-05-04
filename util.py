@@ -379,7 +379,23 @@ def handle_eval_multi(scope_pred, scope_tar, cue_pred, cue_tar):
             else:
                 preds.append(scope_pred[i])
                 tars.append(scope_tar[cm])
-        return preds, tars         
+        return preds, tars
+    
+def handle_eval_joint(pred, tar):
+    tar_cue_pos = []
+    pred_cue_pos = []
+    for i, e in enumerate(tar):
+        if e == 3:
+            tar_cue_pos.append(i)
+    for i, e in enumerate(tar):
+        if e == 3:
+            pred_cue_pos.append(i)
+    tar_cue_pos = set(tar_cue_pos)
+    pred_cue_pos = set(pred_cue_pos)
+    match = tar_cue_pos.intersection(pred_cue_pos)
+    if len(match) == 0:
+        pred = [2 for e in tar]
+    return pred
 
 def pack_subword_pred(logits, targets, subword_mask, padding_mask) -> Tuple[T, T]:
     """

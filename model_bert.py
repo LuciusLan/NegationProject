@@ -91,7 +91,7 @@ class ScopeBert(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.bert = BertModel(config, add_pooling_layer=False)
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(param.dropout)
         if param.matrix:
             if param.augment_cue:
                 if param.fact:
@@ -100,14 +100,20 @@ class ScopeBert(BertPreTrainedModel):
                 else:
                     self.scope = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
             else:
-                self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
-                self.scope = BiaffineClassifier(300*2, 1024, output_dim=config.num_labels)
+                if param.task == 'joint':
+                    self.scope = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
+                else:
+                    self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
+                    self.scope = BiaffineClassifier(300*2, 1024, output_dim=config.num_labels)
         else:
             if param.augment_cue:
                 self.scope = nn.Linear(config.hidden_size, config.num_labels)
             else:
-                self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
-                self.scope = nn.Linear(300*2, config.num_labels)
+                if param.task == 'joint':
+                    self.scope = nn.Linear(config.hidden_size, config.num_labels)
+                else:
+                    self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
+                    self.scope = nn.Linear(300*2, config.num_labels)
         self.sigm = nn.Sigmoid()
         self.init_weights()
     
@@ -180,7 +186,7 @@ class ScopeBert(BertPreTrainedModel):
             return ((loss,) + output) if loss is not None else output
 
 class BiaffineClassifier(nn.Module):
-    def __init__(self, emb_dim, hid_dim, output_dim=param.label_dim, dropout=0.33):
+    def __init__(self, emb_dim, hid_dim, output_dim=param.label_dim, dropout=param.biaffine_hidden_dropout):
         super().__init__()
         self.dep = nn.Linear(emb_dim, hid_dim)
         self.head = nn.Linear(emb_dim, hid_dim)

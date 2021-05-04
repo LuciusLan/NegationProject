@@ -37,9 +37,12 @@ class CueExample(InputExample):
 
 
 class ScopeExample(InputExample):
-    def __init__(self, cues: List[int], scopes: List[T], sc_sent: List[str], **kwargs):
+    def __init__(self, cues: List[int], scopes: List[T], sc_sent: List[str], num_cues=None, **kwargs):
         super().__init__(**kwargs)
-        self.num_cues = len(scopes)
+        if num_cues is None:
+            self.num_cues = len(scopes)
+        else:
+            self.num_cues = num_cues
         self.cues = cues
         self.scopes = scopes
         self.sc_sent = sc_sent
@@ -484,12 +487,13 @@ class Processor(object):
             examples (cues, scopes)>>>(tuple[tuple[train, dev, test], tuple[train, dev, test]]): overload for split.
         """
         assert example_type.lower() in [
-            'train', 'test', 'dev', 'split'], 'Wrong example type.'
+            'train', 'test', 'dev', 'split', 'joint_train', 'joint_dev', 'joint_test', 'joint'], 'Wrong example type.'
         assert cue_or_scope in [
             'cue', 'scope', 'raw'], 'cue_or_scope: Must specify cue of scope, or raw to perform split and get vocab'
 
         cue_examples = []
         non_cue_examples = []
+        non_cue_scopes = []
         scope_examples = []
         for i, _ in enumerate(data.cues[0]):
             guid = '%s-%d' % (example_type, i)
@@ -504,6 +508,8 @@ class Processor(object):
             else:
                 non_cue_examples.append(CueExample(guid=guid, sent=sent, cues=cues,
                                             cue_sep=cue_sep, num_cues=num_cues, subword_mask=None))
+                non_cue_scopes.append(ScopeExample(guid=guid, sent=sent, cues=[cues], num_cues=0,
+                                            scopes=[[2 for c in cues]], sc_sent=[sentence], subword_mask=None))
 
         for i, _ in enumerate(data.scopes[0]):
             guid = '%s-%d' % (example_type, i)
@@ -580,6 +586,71 @@ class Processor(object):
                 torch.save(dev_scope, f'{param.base_path}/split/dev_scope_{cached_file}')
                 torch.save(te_non_cue_sents, f'{param.base_path}/split/ns_{cached_file}')
             return (train_cue, dev_cue, test_cue), (train_scope, dev_scope, test_scope)
+        elif 'joint' in example_type.lower():
+            if dataset_name.lower() == 'sherlock':
+                if cue_or_scope.lower() == 'cue':
+                    cue_examples.extend(non_cue_examples)
+                    return cue_examples
+                elif cue_or_scope.lower() == 'scope':
+                    scope_examples.extend(non_cue_scopes)
+                    return scope_examples
+            else:
+                scope_len = len(scope_examples)
+                train_len = math.floor((1 - test_size - val_size) * scope_len)
+                test_len = math.floor(test_size * scope_len)
+                val_len = scope_len - train_len - test_len
+                scope_index = list(range(scope_len))
+                train_index = random.sample(scope_index, k=train_len)
+                scope_index = del_list_idx(scope_index, train_index)
+                test_index = random.sample(scope_index, k=test_len)
+                scope_index = del_list_idx(scope_index, test_index)
+                dev_index = scope_index.copy()
+
+                train_cue = [cue_examples[i] for i in train_index]
+                test_cue = [cue_examples[i] for i in test_index]
+                dev_cue = [cue_examples[i] for i in dev_index]
+                train_scope = [scope_examples[i] for i in train_index]
+                test_scope = [scope_examples[i] for i in test_index]
+                dev_scope = [scope_examples[i] for i in dev_index]
+
+                random_state = np.random.randint(1, 2020)
+                tr_nocue_, te_nocue = train_test_split(
+                    non_cue_examples, test_size=test_size, random_state=random_state)
+                random_state2 = np.random.randint(1, 2020)
+                tr_nocue, de_nocue = train_test_split(tr_nocue_, test_size=(
+                    val_size / (1 - test_size)), random_state=random_state2)
+
+                tr_nocue_s, te_nocue_s = train_test_split(
+                    non_cue_scopes, test_size=test_size, random_state=random_state)
+                tr_nocue_s, de_nocue_s = train_test_split(tr_nocue_, test_size=(
+                    val_size / (1 - test_size)), random_state=random_state2)
+                train_cue.extend(tr_nocue)
+                dev_cue.extend(de_nocue)
+                test_cue.extend(te_nocue)
+                train_scope.extend(tr_nocue_s)
+                dev_scope.extend(de_nocue_s)
+                test_scope.extend(te_nocue_s)
+                for c, _ in enumerate(train_cue):
+                    train_cue[c].guid = f'train-{c}'
+                for c, _ in enumerate(test_cue):
+                    test_cue[c].guid = f'test-{c}'
+                for c, _ in enumerate(dev_cue):
+                    dev_cue[c].guid = f'dev-{c}'
+                for c, _ in enumerate(train_scope):
+                    train_scope[c].guid = f'train-{c}'
+                for c, _ in enumerate(test_scope):
+                    test_scope[c].guid = f'test-{c}'
+                for c, _ in enumerate(dev_scope):
+                    dev_scope[c].guid = f'dev-{c}'
+                if cached_file is not None:
+                    print('Saving examples into cached file %s', cached_file)
+                    torch.save(train_cue, f'{param.base_path}/split/joint_train_cue_{cached_file}')
+                    torch.save(test_cue, f'{param.base_path}/split/joint_test_cue_{cached_file}')
+                    torch.save(dev_cue, f'{param.base_path}/split/joint_dev_cue_{cached_file}')
+                    torch.save(train_scope, f'{param.base_path}/split/joint_train_scope_{cached_file}')
+                    torch.save(test_scope, f'{param.base_path}/split/joint_test_scope_{cached_file}')
+                    torch.save(dev_scope, f'{param.base_path}/split/joint_dev_scope_{cached_file}')
+                return (train_cue, dev_cue, test_cue), (train_scope, dev_scope, test_scope)
 
     def combine_sher_ex(self, data: List[ExampleLike]) -> List[ExampleLike]:
         tmp_data = []
@@ -776,6 +847,7 @@ class Processor(object):
                                     input_len=wrap_input_len, cues=wrap_cues, scopes=wrap_scopes, num_cues=example.num_cues)
             features.append(feature)
         else:
+            ## Cue
             sent = example.sent.split()
             guid = example.guid
             num_cues = example.num_cues
@@ -851,9 +923,15 @@ class Processor(object):
         assert self.tokenizer is not None, 'Execute self.get_tokenizer() first to get the corresponding tokenizer.'
         features = []
         for example in data:
-            this_features = self.create_feature_from_example(example, cue_or_scope, max_seq_len, is_bert)
-            for e in this_features:
-                features.append(e)
+            f = self.create_feature_from_example(example, cue_or_scope, max_seq_len, is_bert)
+            if param.ignore_multi_negation:
+                # For joint prediction, forced ignore multiple negation sentences
+                if f[0].num_cues > 1:
+                    continue
+            if param.task == 'pipeline':
+                if f[0].num_cues == 0:
+                    continue
+            features.append(f[0])
         return features
     
     def create_features_multi(self, data: List[ExampleLike], cue_or_scope: str,
@@ -1470,9 +1548,9 @@ class OtherTokenizer(NaiveTokenizer):
 if __name__ == "__main__":
     proc = Processor()
     sfu_data = proc.read_data(param.data_path['sfu'], 'sfu')
-    proc.create_examples(sfu_data, 'split', 'sfu', 'cue', 'sfu.pt')
+    proc.create_examples(sfu_data, 'joint', 'sfu', 'cue', 'sfu.pt')
     bio_a_data = proc.read_data(
         param.data_path['bioscope_abstracts'], 'bioscope')
-    proc.create_examples(bio_a_data, 'split', 'bioscope_a', 'cue', 'bioA.pt')
+    proc.create_examples(bio_a_data, 'joint', 'bioscope_a', 'cue', 'bioA.pt')
     bio_f_data = proc.read_data(param.data_path['bioscope_full'], 'bioscope')
-    proc.create_examples(bio_f_data, 'split', 'bioscope_f', 'cue', 'bioF.pt')
+    proc.create_examples(bio_f_data, 'joint', 'bioscope_f', 'cue', 'bioF.pt')
