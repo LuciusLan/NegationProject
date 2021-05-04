@@ -26,6 +26,16 @@ class Param(object):
                     'dev': 'split/dev_scope_sfu.pt',
                     'test': 'split/test_scope_sfu.pt',
                     'ns': 'split/ns_sfu.pt',
+                },
+                'joint_cue': {
+                    'train': 'split/joint_train_cue_sfu.pt',
+                    'dev': 'split/joint_dev_cue_sfu.pt',
+                    'test': 'split/joint_test_cue_sfu.pt',
+                },
+                'joint_scope': {
+                    'train': 'split/joint_train_scope_sfu.pt',
+                    'dev': 'split/joint_dev_scope_sfu.pt',
+                    'test': 'split/joint_test_scope_sfu.pt',
                 }
             },
             'bioscope_abstracts': {
@@ -39,6 +49,16 @@ class Param(object):
                     'dev': 'split/dev_scope_bioA.pt',
                     'test': 'split/test_scope_bioA.pt',
                     'ns': 'split/ns_bioA.pt',
+                },
+                'joint_cue': {
+                    'train': 'split/joint_train_cue_bioA.pt',
+                    'dev': 'split/joint_dev_cue_bioA.pt',
+                    'test': 'split/joint_test_cue_bioA.pt',
+                },
+                'joint_scope': {
+                    'train': 'split/joint_train_scope_bioA.pt',
+                    'dev': 'split/joint_dev_scope_bioA.pt',
+                    'test': 'split/joint_test_scope_bioA.pt',
                 }
             },
             'bioscope_full': {
@@ -52,28 +72,23 @@ class Param(object):
                     'dev': 'split/dev_scope_bioF.pt',
                     'test': 'split/test_scope_bioF.pt',
                     'ns': 'split/ns_bioF.pt',
+                },
+                'joint_cue': {
+                    'train': 'split/joint_train_cue_bioF.pt',
+                    'dev': 'split/joint_dev_cue_bioF.pt',
+                    'test': 'split/joint_test_cue_bioF.pt',
+                },
+                'joint_scope': {
+                    'train': 'split/joint_train_scope_bioF.pt',
+                    'dev': 'split/joint_dev_scope_bioF.pt',
+                    'test': 'split/joint_test_scope_bioF.pt',
                 }
-            }
-        }
-        self.seg_path = {
-            'sfu': 'seg/sfu_seg.bin',
-            'bioscope_a': 'seg/bioscope_a_seg.bin',
-            'bioscope_f': 'seg/bioscope_f_seg.bin',
-            'sherlock_sep': {
-                'train': 'seg/train_seg_s.bin',
-                'dev': 'seg/dev_seg_s.bin',
-                'test': 'seg/test_seg_s.bin',
-            },
-            'sherlock_com': {
-                'train': 'seg/train_seg_c.bin',
-                'dev': 'seg/dev_seg_c.bin',
-                'test': 'seg/test_seg_c.bin',
             }
         }
         self.split_and_save = False
         self.num_runs = 1
         self.dataset_name = 'sherlock' #Available options: 'bioscope_full', 'bioscope_abstracts', 'sherlock', 'sfu'
-        self.task = 'scope' # Available options: 'cue', 'scope', 'pipeline'
+        self.task = 'scope' # Available options: 'cue', 'scope', 'pipeline', 'joint'
         self.predict_cuesep = True # Specify whether to predict the cue seperation
         self.model_name = f'{self.task}_bert_biaf_{self.dataset_name}'
 
@@ -88,10 +103,10 @@ class Param(object):
         self.sherlock_combine_nt = False
 
         self.use_ASL = False
-        self.ignore_multiword_cue = False
+        self.ignore_multiword_cue = True
         self.cased = True
-        self.max_len = 190
-        self.batch_size = 4
+        self.max_len = 260
+        self.batch_size = 2
         self.num_ep = 60
         self.lr = 5e-5
         self.early_stop_thres = 15
@@ -103,26 +118,35 @@ class Param(object):
         self.lstm_emb_type = 'pre_emb'
         self.cue_emb_dim = 10
         self.position_emb_dim = 0
-        self.segment_emb_dim = 0
         self.hidden_dim = 200
         self.dropout = 0.5
+        self.biaffine_hidden_dropout = 0.33
         self.label_dim = 3
-        self.mark_cue = False
+        self.mark_cue = True
         if self.mark_cue:
             self.label_dim += 1
         self.bioes = False
         if self.bioes:
             self.label_dim += 3
-        self.matrix = True
-        if self.matrix:
+        self.matrix = False
+        self.fact = False
+        self.m_dir = 'd2'
+        self.cue_mode = 'diag'
+        if self.m_dir == 'd1':
             self.label_dim += 1
+        if self.cue_mode == 'root':
+            self.label_dim -= 1 
+        self.augment_cue = True
         self.encoder_attention = None # 'meta'
-        self.decoder_attention = ['multihead'] # 'multihead', 'label'
+        self.decoder_attention = [] # 'multihead', 'label'
         self.num_attention_head = 5
         self.external_vocab = False
         self.use_crf = False
         if self.use_crf is True:
             self.label_dim += 2
+
+        self.multi = False
+        self.ignore_multi_negation = False
 
         self.BERT_PRETRAINED_CONFIG_ARCHIVE_MAP = {
             'bert-base-cased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-config.json"
