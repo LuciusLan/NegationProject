@@ -312,32 +312,32 @@ elif param.task == 'pipeline':
         proc.get_tokenizer(data=cue_train_data, is_bert=False)
 
     cue_train_feature = proc.create_features(
-        cue_train_data, cue_or_scope='cue', max_seq_len=param.max_len)
+        cue_train_data, cue_or_scope='cue', max_seq_len=param.max_len, is_bert=param.is_bert)
     cue_dev_feature = proc.create_features(
-        cue_dev_data, cue_or_scope='cue', max_seq_len=param.max_len)
+        cue_dev_data, cue_or_scope='cue', max_seq_len=param.max_len, is_bert=param.is_bert)
     cue_test_feature = proc.create_features(
-        cue_test_data, cue_or_scope='cue', max_seq_len=param.max_len)
+        cue_test_data, cue_or_scope='cue', max_seq_len=param.max_len, is_bert=param.is_bert)
 
     cue_train_ds = proc.create_dataset(
-        cue_train_feature, cue_or_scope='cue', example_type='train')
+        cue_train_feature, cue_or_scope='cue', example_type='train', is_bert=param.is_bert)
     cue_dev_ds = proc.create_dataset(
-        cue_dev_feature, cue_or_scope='cue', example_type='dev')
+        cue_dev_feature, cue_or_scope='cue', example_type='dev', is_bert=param.is_bert)
     cue_test_ds = proc.create_dataset(
-        cue_test_feature, cue_or_scope='cue', example_type='test')
+        cue_test_feature, cue_or_scope='cue', example_type='test', is_bert=param.is_bert)
 
     scope_train_feature = proc.create_features(
-        scope_train_data, cue_or_scope='scope', max_seq_len=param.max_len)
+        scope_train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
     scope_dev_feature = proc.create_features(
-        scope_dev_data, cue_or_scope='scope', max_seq_len=param.max_len)
+        scope_dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
     scope_test_feature = proc.create_features(
-        scope_test_data, cue_or_scope='scope', max_seq_len=param.max_len)
+        scope_test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
 
     scope_train_ds = proc.create_dataset(
-        scope_train_feature, cue_or_scope='scope', example_type='train')
+        scope_train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
     scope_dev_ds = proc.create_dataset(
-        scope_dev_feature, cue_or_scope='scope', example_type='dev')
+        scope_dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
     scope_test_ds = proc.create_dataset(
-        scope_test_feature, cue_or_scope='scope', example_type='test')
+        scope_test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
         
 elif param.task == 'joint':
     param.ignore_multi_negation = True
@@ -383,18 +383,18 @@ elif param.task == 'joint':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
 
     train_feature = proc.create_features(
-        train_data, cue_or_scope='scope', max_seq_len=param.max_len)
+        train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
     dev_feature = proc.create_features(
-        dev_data, cue_or_scope='scope', max_seq_len=param.max_len)
+        dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
     test_feature = proc.create_features(
-        test_data, cue_or_scope='scope', max_seq_len=param.max_len)
+        test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
     
     train_ds = proc.create_dataset(
-        train_feature, cue_or_scope='scope', example_type='train')
+        train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
     dev_ds = proc.create_dataset(
-        dev_feature, cue_or_scope='scope', example_type='dev')
+        dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
     test_ds = proc.create_dataset(
-        test_feature, cue_or_scope='scope', example_type='test')
+        test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
 
 if param.task in ['scope', 'cue', 'joint']:
     train_sp = RandomSampler(train_ds)
@@ -538,9 +538,9 @@ for run in range(param.num_runs):
                                )
     elif param.task == 'joint':
         model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', 
-                                           monitor='placeholder', mode='max', arch=param.model_name,
+                                           monitor='val_scope_token_f1', mode='max', arch=param.model_name,
                                            best=None)
-        early_stopping = EarlyStopping(patience=5, monitor='placeholder', mode='max')
+        early_stopping = EarlyStopping(patience=param.early_stop_thres, monitor='val_scope_token_f1', mode='max')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,
                                logger=global_logger,

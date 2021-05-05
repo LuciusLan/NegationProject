@@ -139,7 +139,7 @@ class ScopeBert(BertPreTrainedModel):
         """
         #return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         return_dict = False
-        if not param.augment_cue:
+        if not param.augment_cue and param.task != 'joint':
             cues = input_ids[1]
             input_ids = input_ids[0]
         outputs = self.bert(
@@ -155,7 +155,7 @@ class ScopeBert(BertPreTrainedModel):
         )
 
         sequence_output = outputs[0]
-        if not param.augment_cue:
+        if not param.augment_cue and param.task != 'joint':
             # Append the cue embedding to the BERT output
             ### Alternative way: concat at input to form doubled length input
             sequence_output = torch.cat([sequence_output, cues.unsqueeze(-1)], 2)
@@ -168,8 +168,11 @@ class ScopeBert(BertPreTrainedModel):
             else:
                 logits = self.scope(sequence_output)
         else:
-            logits = self.lstm(sequence_output)
-            logits = self.scope(logits[0])
+            if param.task == 'joint':
+                logits = self.scope(sequence_output)
+            else:
+                logits = self.lstm(sequence_output)
+                logits = self.scope(logits[0])
 
         loss = None
         if labels is not None:

@@ -685,7 +685,11 @@ class Processor(object):
             wrap_scopes = []
             wrap_padding_mask = []
             wrap_input_len = []
-            for c in range(example.num_cues):
+            num_cue = example.num_cues
+            if param.task == 'joint':
+                if num_cue == 0:
+                    num_cue = 1
+            for c in range(num_cue):
                 sent = example.sc_sent[c]
                 cues = example.cues[c]
                 scopes = example.scopes[c]
@@ -1065,7 +1069,7 @@ class Processor(object):
                         # Process the cue augmentation.
                         # Different from the original repo, the strategy is indicate the cue border
                         if cue != 3:
-                            if pos != 0 and pos != len(sent)-1:
+                            if pos != 0 and pos != len(tmp_text)-1:
                                 if cue == prev:
                                     # continued cue, don't care is subword or multi word cue
                                     new_masks.append(mask)
@@ -1248,7 +1252,11 @@ class Processor(object):
                 input_len = []
                 cues = []
                 for feature in features:
-                    for cue_i in range(feature.num_cues):
+                    num_cue = feature.num_cues
+                    if param.task == 'joint':
+                        if num_cue == 0:
+                            num_cue = 1
+                    for cue_i in range(num_cue):
                         input_ids.append(feature.input_ids[cue_i])
                         padding_mask.append(feature.padding_mask[cue_i])
                         scopes.append(feature.scopes[cue_i])

@@ -7,7 +7,7 @@ import torch
 from torch.nn.utils import clip_grad_norm_
 import numpy as np
 from tqdm import tqdm
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, f1_score
 
 import util
 from util import pack_subword_pred
@@ -145,9 +145,9 @@ class CueTrainer(object):
                     loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
             test_loss.update(val=loss.item(), n=input_ids.size(0))
             if is_bert:
-                cue_pred, cue_tar = pack_subword_pred(cue_logits.detach().cpu(), cues.detach().cpu(), subword_mask.detach().cpu())
+                cue_pred, cue_tar = pack_subword_pred(cue_logits.detach().cpu(), cues.detach().cpu(), subword_mask.detach().cpu(), padding_mask.detach().cpu())
                 if param.predict_cuesep:
-                    cue_sep_pred, cue_sep_tar = pack_subword_pred(cue_sep_logits.detach().cpu(), cue_sep.detach().cpu(), subword_mask.detach().cpu())
+                    cue_sep_pred, cue_sep_tar = pack_subword_pred(cue_sep_logits.detach().cpu(), cue_sep.detach().cpu(), subword_mask.detach().cpu(), padding_mask.detach().cpu())
             else:
                 cue_pred = cue_logits.argmax()
                 cue_tar = cues
@@ -214,9 +214,9 @@ class CueTrainer(object):
                     loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
             valid_loss.update(val=loss.item(), n=input_ids.size(0))
             if is_bert:
-                cue_pred, cue_tar = pack_subword_pred(cue_logits.detach().cpu(), cues.detach().cpu(), subword_mask.detach().cpu())
+                cue_pred, cue_tar = pack_subword_pred(cue_logits.detach().cpu(), cues.detach().cpu(), subword_mask.detach().cpu(), padding_mask.detach().cpu())
                 if param.predict_cuesep:
-                    cue_sep_pred, cue_sep_tar = pack_subword_pred(cue_sep_logits.detach().cpu(), cue_sep.detach().cpu(), subword_mask.detach().cpu())
+                    cue_sep_pred, cue_sep_tar = pack_subword_pred(cue_sep_logits.detach().cpu(), cue_sep.detach().cpu(), subword_mask.detach().cpu(), padding_mask.detach().cpu())
             else:
                 cue_pred = cue_logits.argmax()
                 cue_tar = cues
@@ -315,7 +315,7 @@ class CueTrainer(object):
 
             if param.predict_cuesep:
                 cue_log, cue_sep_log = self.valid_epoch(valid_data, is_bert)
-                cue_f1 = target_weight_score(cue_log, ['0', '1', '2'])
+                cue_f1 = target_weight_score(cue_log, ['1'])
                 cue_sep_f1 = target_weight_score(cue_sep_log, ['1', '2', '3', '4'])
                 logs = {'loss': train_log['loss'], 'val_cue_f1': cue_f1[0], 'val_cuesep_f1': cue_sep_f1[0]}
                 score = cue_f1[0]+cue_sep_f1[0]
@@ -398,6 +398,10 @@ class ScopeTrainer(object):
         valid_loss = AverageMeter()
         wrap_scope_pred = []
         wrap_scope_tar = []
+        sm_pred = []
+        sm_tar = []
+        cm_pred = []
+        cm_tar = []
         for step, f in enumerate(data_features):
             num_labels = param.label_dim
             input_ids = f[0].to(self.device)
@@ -422,7 +426,7 @@ class ScopeTrainer(object):
                         pad_matrix.append(mat)
                     pad_matrix = torch.stack(pad_matrix, 0)
                     active_padding_mask = pad_matrix.view(-1) == 1
-                    if not param.augment_cue:
+                    if not param.augment_cue and param.task != 'joint':
                         scope_logits = self.model([input_ids, cues], padding_mask)[0]
                     else:
                         scope_logits = self.model(input_ids, padding_mask)[0]
@@ -444,7 +448,7 @@ class ScopeTrainer(object):
                         target_masked = scopes_matrix.view(-1)[active_padding_mask]
                         loss = self.criterion(logits_masked, target_masked)
                 else:
-                    if not param.augment_cue:
+                    if not param.augment_cue and param.task != 'joint':
                         scope_logits = self.model([input_ids, cues], padding_mask)[0]
                     else:
                         scope_logits = self.model(input_ids, padding_mask)[0]
@@ -469,7 +473,13 @@ class ScopeTrainer(object):
             else:
                 scope_pred = scope_logits.argmax()
                 scope_tar = scopes
-
+                scope_pred = [e.tolist() for e in scope_pred]
+                scope_tar = [e.tolist() for e in scope_tar]
+            if param.task == 'joint':
+                new_pred = []
+                for i, seq in enumerate(input_ids):
+                    new_pred.append(util.handle_eval_joint(scope_pred[i], scope_tar[i]))
+                scope_pred = new_pred
             if param.dataset_name == 'sherlock':
                 # Post process for Sherlock, separate "n't" words and mark affixal cues
                 new_pred = []
@@ -481,25 +491,42 @@ class ScopeTrainer(object):
                     new_tar.append(util.postprocess_sher(seq, scope_tar[i], cues[i], subword_mask[i], input_lens[i], text_seq, text_string))
                 
                 for i1, sent in enumerate(new_pred):
+                    sp, st = util.full_scope_match(new_pred[i1], new_tar[i1])
+                    cp, ct = util.cue_match(new_pred[i1], new_tar[i1])
+                    sm_pred.append(sp)
+                    sm_tar.append(st)
+                    cm_pred.append(cp)
+                    cm_tar.append(ct)
                     for i2, _ in enumerate(sent):
                         wrap_scope_pred.append(new_pred[i1][i2])
                         wrap_scope_tar.append(new_tar[i1][i2])
             else:
                 for i1, sent in enumerate(scope_pred):
+                    sp, st = util.full_scope_match(scope_pred[i1], scope_tar[i1])
+                    cp, ct = util.cue_match(scope_pred[i1], scope_tar[i1])
+                    sm_pred.append(sp)
+                    sm_tar.append(st)
+                    cm_pred.append(cp)
+                    cm_tar.append(ct)
                     for i2, _ in enumerate(sent):
-                        wrap_scope_pred.append(scope_pred[i1][i2].tolist())
-                        wrap_scope_tar.append(scope_tar[i1][i2].tolist())
+                        wrap_scope_pred.append(scope_pred[i1][i2])
+                        wrap_scope_tar.append(scope_tar[i1][i2])
 
             pbar.update()
             pbar.set_postfix({'loss': loss.item()})
+        if param.label_dim > 3:
+            cue_f1 = f1_score(cm_tar, cm_pred)
+        else:
+            cue_f1 = 1
+        scope_match = f1_score(sm_tar, sm_pred)
         if (param.mark_cue or param.matrix) and ('bioscope' in param.dataset_name or 'sfu' in param.dataset_name):
             # For bioscope and sfu, include "cue" into scope if predicting cue
-            wrap_scope_tar = [1 if e == 3 else e for e in wrap_scope_tar]
-            wrap_scope_pred = [1 if e == 3 else e for e in wrap_scope_pred]
+            wrap_scope_tar = [e if e != 3 else 1 for e in wrap_scope_tar]
+            wrap_scope_pred = [e if e != 3 else 1 for e in wrap_scope_pred]
         scope_val_info = classification_report(wrap_scope_tar, wrap_scope_pred, output_dict=True, digits=5)
         if 'cuda' in str(self.device):
             torch.cuda.empty_cache()
-        return scope_val_info
+        return scope_val_info, cue_f1, scope_match
 
     def train_epoch(self, data_loader, valid_data):
         pbar = tqdm(total=len(data_loader), desc='Training')
@@ -524,7 +551,7 @@ class ScopeTrainer(object):
                     pad_matrix.append(mat)
                 pad_matrix = torch.stack(pad_matrix, 0)
                 active_padding_mask = pad_matrix.view(-1) == 1
-                if not param.augment_cue:
+                if not param.augment_cue and param.task != 'joint':
                     scope_logits = self.model([input_ids, cues], padding_mask)[0]
                 else:
                     scope_logits = self.model(input_ids, padding_mask)[0]
@@ -547,7 +574,7 @@ class ScopeTrainer(object):
                     target_masked = scopes_matrix.view(-1)#[active_padding_mask]
                     loss = self.criterion(logits_masked, target_masked)
             else:
-                if not param.augment_cue:
+                if not param.augment_cue and param.task != 'joint':
                     scope_logits = self.model([input_ids, cues], padding_mask)[0]
                 else:
                     scope_logits = self.model(input_ids, padding_mask)[0]
@@ -580,12 +607,15 @@ class ScopeTrainer(object):
         for epoch in range(self.start_epoch, self.start_epoch + int(epochs)):
             self.logger.info(f"Epoch {epoch}/{int(epochs)}")
             train_log = self.train_epoch(train_data, valid_data)
-            scope_log = self.valid_epoch(valid_data, is_bert)
+            scope_log, cue_f1, scope_match = self.valid_epoch(valid_data, is_bert)
             scope_f1 = target_weight_score(scope_log, ['1'])
             logs = {'loss': train_log['loss'], 'val_scope_token_f1': scope_f1[0]}
             #logs = dict(train_log, **cue_log['weighted avg'], **cue_sep_log['weighted avg'])
             #show_info = f'Epoch: {epoch} - ' + "-".join([f' {key}: {value:.4f} ' for key, value in logs.items()])
+            if param.task == 'joint':
+                self.logger.info('cue_f1 %f', cue_f1)
             self.logger.info(logs)
+            self.logger.info('scope match %f', scope_match)
             #self.logger.info("The entity scores of valid data : ")
             '''for key, value in class_info.items():
                 info = f'Entity: {key} - ' + "-".join([f' {key_}: {value_:.4f} ' for key_, value_ in value.items()])

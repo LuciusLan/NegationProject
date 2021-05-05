@@ -2,6 +2,7 @@ from typing import List, Tuple, T
 import logging
 import math
 import json
+import re
 import six
 import numpy as np
 import torch
@@ -387,7 +388,7 @@ def handle_eval_joint(pred, tar):
     for i, e in enumerate(tar):
         if e == 3:
             tar_cue_pos.append(i)
-    for i, e in enumerate(tar):
+    for i, e in enumerate(pred):
         if e == 3:
             pred_cue_pos.append(i)
     tar_cue_pos = set(tar_cue_pos)
@@ -396,6 +397,59 @@ def handle_eval_joint(pred, tar):
     if len(match) == 0:
         pred = [2 for e in tar]
     return pred
+
+def cue_match(pred, tar):
+    tar_cue_pos = []
+    pred_cue_pos = []
+    for i, e in enumerate(tar):
+        if e == 3:
+            tar_cue_pos.append(i)
+    for i, e in enumerate(pred):
+        if e == 3:
+            pred_cue_pos.append(i)
+    tar_cue_pos = set(tar_cue_pos)
+    pred_cue_pos = set(pred_cue_pos)
+    match = tar_cue_pos.intersection(pred_cue_pos)
+    if len(tar_cue_pos) != 0:
+        if tar_cue_pos == pred_cue_pos:
+            p = 1
+            t = 1
+        else:
+            p = 0
+            t = 1
+    else:
+        if tar_cue_pos == pred_cue_pos:
+            p = 0
+            t = 0
+        else:
+            p = 1
+            t = 0
+    return p, t
+
+def full_scope_match(pred, tar):
+    tar_scope_pos = []
+    pred_scope_pos = []
+    for i, e in enumerate(tar):
+        if e == 1:
+            tar_scope_pos.append(i)
+    for i, e in enumerate(pred):
+        if e == 1:
+            pred_scope_pos.append(i)
+    if len(tar_scope_pos) != 0:
+        if pred_scope_pos == tar_scope_pos:
+            p = 1
+            t = 1
+        else:
+            p = 0
+            t = 1
+    else:
+        if pred_scope_pos == tar_scope_pos:
+            p = 0
+            t = 0
+        else:
+            p = 1
+            t = 0
+    return p, t
 
 def pack_subword_pred(logits, targets, subword_mask, padding_mask) -> Tuple[T, T]:
     """
@@ -470,12 +524,20 @@ def postprocess_sher(input_id, scope_pred, cue, subword_mask, input_len, text_se
                     # if not cue, simply split it
                     new_pred.insert(i, scope_pred[i])
     if 4 in cue:
+        # for affixal cue, mark it as part of scope, to simulate separation of affixes 
+        # (root being scope, affix being cue)
         packed_cue = pack_subword_text(cue, subword_mask, input_len)
-        for i, c in enumerate(packed_cue):
-            if c == 4:
-                # for affixal cue, mark it as part of scope, to simulate separation of affixes 
-                # (root being scope, affix being cue)
-                new_pred[i] = 1
+        if param.task == 'joint':
+            # For joint model, don't leak gold cue information, use simple rules instead.
+            is_aff = r'(^(un)|(non)|(dis)|(in)|(ir)|(im)|(il))|(less$)'
+            for i, word in enumerate(packed_text):
+                if re.search(is_aff, word, re.I) is not None and new_pred[i] == 3:
+                    new_pred[i] = 1
+        else:
+            # For pipeline model, use input cue information (either predicted or gold) to get better result
+            for i, c in enumerate(packed_cue):
+                if c == 4 and new_pred[i] == 3:
+                    new_pred[i] = 1
     return new_pred
 
 
