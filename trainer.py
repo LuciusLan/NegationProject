@@ -519,7 +519,7 @@ class ScopeTrainer(object):
         else:
             cue_f1 = 1
         scope_match = f1_score(sm_tar, sm_pred)
-        if (param.mark_cue or param.matrix) and ('bioscope' in param.dataset_name or 'sfu' in param.dataset_name):
+        if (param.mark_cue or param.matrix) and ('bioscope' in param.dataset_name):
             # For bioscope and sfu, include "cue" into scope if predicting cue
             wrap_scope_tar = [e if e != 3 else 1 for e in wrap_scope_tar]
             wrap_scope_pred = [e if e != 3 else 1 for e in wrap_scope_pred]

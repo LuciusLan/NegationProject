@@ -567,7 +567,7 @@ for run in range(param.num_runs):
     elif param.task == 'scope':
         trainer.train(train_data=train_dl, valid_data=dev_dl,
                       epochs=param.num_ep, is_bert=param.is_bert)
-        scope_val_info = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
+        scope_val_info, cue_f1, scope_match = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
         f1 = target_weight_score(scope_val_info, ['1'])
         global_logger.info(f1)
         if f1[0] > best_f:
@@ -579,7 +579,7 @@ for run in range(param.num_runs):
     elif param.task == 'joint':
         trainer.train(train_data=train_dl, valid_data=dev_dl,
                       epochs=param.num_ep, is_bert=param.is_bert)
-        scope_val_info = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
+        scope_val_info, cue_f1, scope_match = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
         f1 = target_weight_score(scope_val_info, ['1'])
         global_logger.info(f1)
         if f1[0] > best_f:
