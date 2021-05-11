@@ -6,7 +6,7 @@ from params import param
 
 
 cue_id2label = {4: 'Affix', 1: 'Cue', 2: 'MultiWordCue', 3: 'O'}
-cue_label2id = {0: 0, 1: 1, 2: 2, 3: 3}
+cue_label2id = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
 scope_id2label = {0: '<PAD>', 1: 'I', 2:'O', 3: 'C', 4: 'B', 5: 'E', 6: 'S'}
 
 class RawData():

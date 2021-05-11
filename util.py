@@ -394,8 +394,18 @@ def handle_eval_joint(pred, tar):
     tar_cue_pos = set(tar_cue_pos)
     pred_cue_pos = set(pred_cue_pos)
     match = tar_cue_pos.intersection(pred_cue_pos)
-    if len(match) == 0:
-        pred = [2 for e in tar]
+    if len(match) == 0 and (len(tar_cue_pos) != 0 or len(pred_cue_pos) != 0):
+        if len(pred_cue_pos) > 0 and len(tar_cue_pos) == 0:
+            # if predicting a cue but no negation in ground truth, mark all predicted
+            # scope as false positive (set all tar negative) 
+            # (Actually no need to do this, as the target scope will already be all 2)
+            pass
+        elif len(pred_cue_pos) == 0 and len(tar_cue_pos) > 0:
+            # if failed to predict a cue / predicting wrong cue
+            # mark all predicted scope as false negative
+            pred = [2 for e in tar]
+        else:
+            pred = [2 for e in tar]
     return pred
 
 def cue_match(pred, tar):

@@ -2,6 +2,8 @@ import random
 import math
 import copy
 import gc
+from typing import List, Tuple, T, Iterable, Union, NewType
+
 import torch
 from torch import Tensor
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Dataset
@@ -9,10 +11,9 @@ from sklearn.model_selection import train_test_split
 from transformers import BertTokenizer, AutoTokenizer
 from transformers.file_utils import cached_path
 import numpy as np
-from typing import List, Tuple, T, Iterable, Union, NewType
 import gensim
 import _pickle
-
+from tqdm import tqdm
 from util import pad_sequences, del_list_idx
 from data import RawData
 from params import param
@@ -495,20 +496,25 @@ class Processor(object):
         non_cue_examples = []
         non_cue_scopes = []
         scope_examples = []
+        cue_i = 0
+        non_cue_i = 0
         for i, _ in enumerate(data.cues[0]):
-            guid = '%s-%d' % (example_type, i)
             sentence = data.cues[0][i]
             cues = data.cues[1][i]
             cue_sep = data.cues[2][i]
             num_cues = data.cues[3][i]
             sent = ' '.join(sentence)
             if num_cues > 0:
+                guid = '%s-%d' % (example_type, cue_i)
+                cue_i += 1
                 cue_examples.append(CueExample(guid=guid, sent=sent, cues=cues,
                                             cue_sep=cue_sep, num_cues=num_cues, subword_mask=None))
             else:
-                non_cue_examples.append(CueExample(guid=guid, sent=sent, cues=cues,
+                guid = '%s-%d' % (example_type, non_cue_i)
+                non_cue_i += 1
+                non_cue_examples.append(CueExample(guid='nc'+guid, sent=sent, cues=cues,
                                             cue_sep=cue_sep, num_cues=num_cues, subword_mask=None))
-                non_cue_scopes.append(ScopeExample(guid=guid, sent=sent, cues=[cues], num_cues=0,
+                non_cue_scopes.append(ScopeExample(guid='nc'+guid, sent=sent, cues=[cues], num_cues=0,
                                             scopes=[[2 for c in cues]], sc_sent=[sentence], subword_mask=None))
 
         for i, _ in enumerate(data.scopes[0]):
@@ -974,7 +980,7 @@ class Processor(object):
         """
         assert self.tokenizer is not None, 'Execute self.get_tokenizer() first to get the corresponding tokenizer.'
         features = []
-        for counter, cue_ex in enumerate(cue_input):
+        for counter, cue_ex in tqdm(enumerate(cue_input), desc='Processing input', total=len(cue_input)):
             wrap_sents = []
             wrap_input_id = []
             wrap_subword_mask = []
@@ -1033,9 +1039,9 @@ class Processor(object):
                 # pred_cue:     [3, 3, 3, 3, 1, 3, 3, 3, 1, 3, 3]
                 # pred_cue_sep: [0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0]
                 nu = pred_cue_sep.clone()
-                num_cues = nu.max().item()
-                sep_cues = [[3] * tmp_input_lens for c in range(num_cues)]
-                for c in range(num_cues):
+                pred_num_cues = nu.max().item()
+                sep_cues = [[3] * tmp_input_lens for c in range(pred_num_cues)]
+                for c in range(pred_num_cues):
                     for i, e in enumerate(tmp_pad_mask):
                         if e == 1:
                             if pred_cue_sep[i].item() == c+1:
@@ -1047,19 +1053,18 @@ class Processor(object):
                         if e == 1:
                             if tmp_sep[i] == gc+1:
                                 gold_sep_cues[gc][i] = tmp_cue[i]
-                nc = max(num_cues, gold_nc)
+                nc = max(pred_num_cues, gold_nc)
                 cue_match = [-1 for c in range(nc)]
-                for pc in range(num_cues):
-                    pred_cue_pos = [index for index, v in enumerate(sep_cues[pc]) if v == 1 or v == 0]
+                for pc in range(pred_num_cues):
+                    pred_cue_pos = [index for index, v in enumerate(sep_cues[pc]) if v == 1 or v == 2 or v == 4]
                     for gc in range(gold_nc):
-                        gold_cue_pos = [index for index, v in enumerate(gold_sep_cues[gc]) if v == 1 or v == 0]
+                        gold_cue_pos = [index for index, v in enumerate(gold_sep_cues[gc]) if v == 1 or v == 2 or v == 4]
                         match = bool(set(pred_cue_pos) & set(gold_cue_pos))
-                        print()
                         if match:
                             cue_match[pc] = gc
 
 
-                for c in range(num_cues):
+                for c in range(pred_num_cues):
                     new_text = []
                     new_cues = []
                     new_masks = []
@@ -1133,12 +1138,16 @@ class Processor(object):
                     wrap_padding_mask.append(padding_mask)
                     wrap_input_len.append(input_len)
 
-            if counter < len(scope_input):
-                gold_scopes = scope_input[counter].scopes
-                gold_num_cue = gold_nc
-            else:
+            if cue_ex.guid.startswith('nc'):
                 gold_num_cue = gold_nc
                 gold_scopes = [[2 for i in sent_list]]
+            else:
+                temp_scopes = scope_input[counter].scopes.copy()
+                for c in range(scope_input[counter].num_cues):
+                    temp_scopes[c].insert(0, 2)
+                    temp_scopes[c].append(2)
+                gold_scopes = temp_scopes
+                gold_num_cue = gold_nc
 
             feature = PipelineScopeFeature(guid=cue_ex.guid, or_sent=cue_ex.sent, sents=wrap_sents, input_ids=wrap_input_id,
                                            padding_mask=wrap_padding_mask, subword_mask=wrap_subword_mask,
