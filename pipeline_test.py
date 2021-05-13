@@ -11,6 +11,7 @@ from model_bert import CueBert, ScopeBert
 from optimizer import BertAdam, BERTReduceLROnPlateau, ASLSingleLabel
 from util import TrainingMonitor, ModelCheckpoint, EarlyStopping, global_logger, pack_subword
 from params import param
+from tqdm import tqdm
 
 proc = Processor()
 
@@ -23,6 +24,7 @@ sherlock_raw = SplitMoreData([sherlock_test1.cues, sherlock_test2.cues], [sherlo
                     sherlock_test1.non_cue_sents, sherlock_test2.non_cue_sents])
 cue_data = proc.create_examples(sherlock_raw, 'test', 'sherlock', 'cue')
 scope_data = proc.create_examples(sherlock_raw, 'test', 'sherlock', 'scope')
+scope_data = proc.scope_add_cue(scope_data)
 """
 cue_data = proc.load_examples(
             param.split_path['bioscope_abstracts']['cue']['test'])
@@ -35,9 +37,8 @@ if param.bioes:
 
 proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
 
-cue_model = CueBert.from_pretrained('D:\\Dev\\Bert\\cue_bert_base_sherlock')
+cue_model = CueBert.from_pretrained('D:\\Dev\\Bert\\cue_bert_base_sherlock').cuda()
 #model = torch.load('model_chk/scope_bert_base_sherlock.pt')
-cue_model.cuda()
 
 
 
@@ -70,28 +71,28 @@ fp = proc.create_features_pipeline(cue_data, scope_data, cue_model, max_seq_len=
 
 del cue_model
 
-scope_model = ScopeBert.from_pretrained('D:\\Dev\\Bert\\scope_bert_base_sherlock')
+scope_model = ScopeBert.from_pretrained('D:\\Dev\\Bert\\scope_bert_base_sherlock').cuda()
 num_labels = scope_model.num_labels
 all_tar = []
 all_pred = []
 all_match = []
-for pair in fp:
+for pair in tqdm(fp, desc='Evaluating', total=len(fp)):
     pred_nc = len(pair.cue_match)
     if pred_nc == []:
         continue
     for input_, pad, subw, c_match, index in zip(pair.input_ids, pair.padding_mask, pair.subword_mask, pair.cue_match, list(range(pred_nc))):
         with torch.no_grad():
-            input_ = torch.LongTensor(input_).unsqueeze(0)
-            pad = torch.LongTensor(pad).unsqueeze(0)
-            scope_logits = scope_model(input_, pad)[0].argmax(-1)
+            input_ = torch.LongTensor(input_).unsqueeze(0).cuda()
+            pad = torch.LongTensor(pad).unsqueeze(0).cuda()
+            scope_logits = scope_model(input_, pad)[0].cpu().argmax(-1)
             scope_pred = pack_subword(scope_logits, subw)
         if c_match != -1:
             if pair.gold_num_cues != 0:
                 target = pair.gold_scopes[c_match]
-                pred = scope_pred[1:-1]
+                pred = scope_pred
             else:
                 target = pair.gold_scopes
-                pred = scope_pred[1:-1]
+                pred = scope_pred
         else:
             if index > pair.gold_num_cues - 1:
                 target = [2 for v in scope_pred]
@@ -99,12 +100,9 @@ for pair in fp:
             else:
                 target = pair.gold_scopes[index]
                 pred = [2 for v in target]
-    if len(target) != len(pred):
-        pred = pred[:-1]
     assert len(target) == len(pred)
     all_tar.append(target)
     all_pred.append(pred)
-    all_match.append(c_match)
 
 result = classification_report(
             [i for j in all_tar for i in j], [i for j in all_pred for i in j], digits=4, output_dict=True)

@@ -129,8 +129,8 @@ class MultiScopeFeature(object):
         self.subword_mask = subword_mask
         self.input_len = input_len
         self.num_cues = num_cues
-        (self.cues, self.scopes), (self.master_input_ids, self.master_subword_masks, self.master_padding_masks) = \
-            mark_all_cues(cues, scopes, input_len, (input_ids, subword_mask, padding_mask))
+        self.cues = cues
+        self.scopes = scopes
         self.master_mat = master_mat
 
 class PipelineScopeFeature(object):
@@ -150,22 +150,21 @@ class PipelineScopeFeature(object):
 FeatureLike = Union[CueFeature, ScopeFeature, PipelineScopeFeature, MultiScopeFeature]
 
 class MultiScopeDataset(Dataset):
-    def __init__(self, input_ids, master_padding_masks, scopes, input_len, cues, master_subword_masks, master_input_ids, master_mat):
+    def __init__(self, input_ids, padding_masks, scopes, input_len, cues, subword_masks, master_mat):
         self.input_ids = input_ids
-        self.master_padding_masks = master_padding_masks
+        self.padding_masks = padding_masks
         self.scopes = scopes
         self.input_len = input_len
         self.cues = cues
-        self.master_subword_masks = master_subword_masks
-        self.master_input_ids = master_input_ids
+        self.subword_masks = subword_masks
         self.master_mat = master_mat
 
     def __getitem__(self, index):
-        return self.input_ids[index], self.master_padding_masks[index], self.scopes[index], self.input_len[index], \
-               self.cues[index], self.master_subword_masks[index], self.master_input_ids[index], self.master_mat[index]
+        return self.input_ids[index], self.padding_masks[index], self.scopes[index], self.input_len[index], \
+               self.cues[index], self.subword_masks[index], self.master_mat[index]
 
     def __len__(self):
-        return self.input_ids.size(0)
+        return len(self.input_ids)
 
 bioes_to_id = {'<PAD>': 0, 'I': 1, 'O': 2, 'B': 3, 'E': 4, 'S': 5, 'C': 6}
 
@@ -324,69 +323,6 @@ def single_scope_to_link_matrix_pad(scope: List, cues: List, input_len: int,
     mat = torch.LongTensor(mat)
     return mat
 
-def mark_all_cues(cues, scopes, input_lens, inputs=None, neg_token_id=1):
-    """
-    inputs (input_ids, subword_masks, padding_masks)
-    """
-    num_cues = len(cues)
-    cue_pos = []
-    for cue in cues:
-        tmp = []
-        for i, e in enumerate(cue):
-            if e != 3:
-                tmp.append(i)
-        cue_pos.append(tmp)
-    all_cue_pos = cue_pos.copy()
-    # Modify the cues and scopes sequences to fit for augmentation of all cues
-    all_cue_scopes = []
-    all_cue_cues = []
-
-    for i in range(num_cues):
-        if i == 0:
-            continue
-        # shift following cues position by 2 due to the special tokens
-        # (i > 1)
-        tmp = [e + 2*i for e in cue_pos[i]]
-        all_cue_pos[i] = tmp
-    
-    for i in range(num_cues):
-        stmp = scopes[i].copy()
-        ctmp = cues[i].copy()
-        for j in range(num_cues):
-            if j == i:
-                continue
-            if j > i:
-                c = 1
-            else:
-                c = 0
-            left = np.min(all_cue_pos[j])
-            right = np.max(all_cue_pos[j])
-            cue_ = np.min(cue_pos[j]) + 2 * c
-            stmp.insert(left, scopes[i][cue_])
-            stmp.insert(right, scopes[i][cue_])
-            ctmp.insert(left, cues[i][cue_])
-            ctmp.insert(right, cues[i][cue_])
-        all_cue_scopes.append(stmp)
-        all_cue_cues.append(ctmp)
-    
-    if inputs is not None:
-        input_ids = inputs[0].copy()[0]
-        subword_masks = inputs[1].copy()[0]
-        padding_masks = inputs[2].copy()[0]
-        for i in range(1, num_cues):
-            left = np.min(all_cue_pos[i])
-            right = np.max(all_cue_pos[i])
-            input_ids.insert(left, neg_token_id)
-            input_ids.insert(right, neg_token_id)
-            subword_masks.insert(left, 1)
-            subword_masks[left+1] = 0
-            subword_masks.insert(right, 0)
-            padding_masks.insert(left, 1)
-            padding_masks.insert(right, 1)
-        return (all_cue_cues, all_cue_scopes), (input_ids, subword_masks, padding_masks)
-    else:
-        return (all_cue_cues, all_cue_scopes), None
-
 def multi_scope_to_link_matrix_pad(scopes: List[List], cues: List[List], input_lens: List[int]) -> np.ndarray:
     """
     To convert the scope list (single cue) to a link matrix that represents
@@ -402,61 +338,35 @@ def multi_scope_to_link_matrix_pad(scopes: List[List], cues: List[List], input_l
     if num_cues == 1:
         return single_scope_to_link_matrix_pad(scopes[0], cues[0], input_lens[0], 'd2')
     else:
-        (all_cue_cues, all_cue_scopes), _ = mark_all_cues(cues, scopes, input_lens, None)
 
         mat_dim = param.max_len
         all_sub_matrix = []
         for c in range(num_cues):
             mat = np.zeros((mat_dim, mat_dim), dtype=np.int)
-            full_seq_len = len(all_cue_scopes[c])
-            """
-            # for root mode, force the direction to be single directed (d2)
-            for i in range(full_seq_len):
-                # scan through the matrix by row to fill
-                if all_cue_scopes[c][i] == 3:
-                    # The row at cue
-                    mat[0][i] = 1
-                    mat[i][0] = 2
-                    for j in range(full_seq_len):
-                        if all_cue_scopes[c][j] != 3:
-                            mat[i][j] = all_cue_scopes[c][j]
-                        else:
-                            mat[i][j] = 2
-                else:
-                    mat[0][i] = 2
-                    for j in range(full_seq_len):
-                        if all_cue_scopes[c][j] == 3:
-                            if all_cue_scopes[c][i] == 1:
-                                mat[i][j] = 2
-                            else:
-                                mat[i][j] = all_cue_scopes[c][i]
-                        else:
-                            mat[i][j] = 2
-                mat[i][i] = 0
-            all_sub_matrix.append(mat)"""
+            full_seq_len = len(scopes[c])
 
             for i in range(full_seq_len):
-                if all_cue_scopes[c][i] == 3:
+                if scopes[c][i] == 3:
                     # The row at cue
                     for j in range(full_seq_len):
-                        mat[i][j] = all_cue_scopes[c][j]
+                        mat[i][j] = scopes[c][j]
                 else:
                     for j in range(full_seq_len):
-                        if all_cue_scopes[c][j] == 3:
-                            if all_cue_scopes[c][i] == 1:
+                        if scopes[c][j] == 3:
+                            if scopes[c][i] == 1:
                                 mat[i][j] = 2
                             else:
-                                mat[i][j] = all_cue_scopes[c][i]
+                                mat[i][j] = scopes[c][i]
                         else:
                             mat[i][j] = 2
             all_sub_matrix.append(mat)
         master_mat = np.zeros((mat_dim, mat_dim), dtype=np.int)
-        for i in range(len(all_cue_scopes[c])):
-            for j in range(len(all_cue_scopes[c])):
+        for i in range(len(scopes[c])):
+            for j in range(len(scopes[c])):
                 master_mat[i][j] = 2
         for m in all_sub_matrix:
-            for i in range(len(all_cue_scopes[c])):
-                for j in range(len(all_cue_scopes[c])):
+            for i in range(len(scopes[c])):
+                for j in range(len(scopes[c])):
                     if m[i][j] == 1:
                         master_mat[i][j] = 1
                     if m[i][j] == 3:
@@ -1084,14 +994,14 @@ class Processor(object):
                                     # left bound
                                     new_text.append('[unused1]')
                                     new_cues.append(cue)
-                                    new_masks.append(1)
+                                    new_masks.append(mask)
                                     new_text.append(token)
                                     new_masks.append(0)
                                     new_cues.append(cue)
                             elif pos == 0:
                                 # at pos 0
                                 new_text.append('[unused1]')
-                                new_masks.append(1)
+                                new_masks.append(mask)
                                 new_cues.append(cue)
                                 new_text.append(token)
                                 new_masks.append(0)
@@ -1342,39 +1252,37 @@ class Processor(object):
             return Dataset(features)
         elif cue_or_scope.lower() == 'multi': 
             # feature: MultiScopeFeature
-            master_input_ids = []
             master_mat = []
-            master_padding_masks = []
-            master_subword_masks = []
+            padding_masks = []
+            subword_masks = []
             input_len = []
             input_ids = []
             scopes = []
             cues = []
             for feature in features:
-                input_ids.append(feature.input_ids)
-                master_padding_masks.append(feature.master_padding_masks)
+                input_ids.append(feature.input_ids[0])
+                padding_masks.append(feature.padding_masks)
                 scopes.append(feature.scopes)
-                master_subword_masks.append(feature.master_subword_masks)
+                subword_masks.append(feature.subword_masks)
                 input_len.append(feature.input_len)
                 cues.append(feature.cues)
-                master_input_ids.append(feature.master_input_ids)
                 master_mat.append(feature.master_mat)
 
-            master_padding_masks = pad_sequences(master_padding_masks,
+            padding_masks = pad_sequences(padding_masks,
                                          maxlen=param.max_len, value=0, padding="post",
                                          dtype="long", truncating="post").tolist()
-            master_subword_masks = pad_sequences(master_subword_masks,
+            subword_masks = pad_sequences(subword_masks,
                                          maxlen=param.max_len, value=0, padding="post",
                                          dtype="long", truncating="post").tolist()
-            master_input_ids = pad_sequences(master_input_ids,
+            input_ids = pad_sequences(input_ids,
                                       maxlen=param.max_len, value=0, padding="post",
                                       dtype="long", truncating="post").tolist()
 
-            master_input_ids = torch.LongTensor(master_input_ids)
-            master_padding_masks = torch.LongTensor(master_padding_masks)
-            master_subword_masks = torch.LongTensor(master_subword_masks)
+            input_ids = torch.LongTensor(input_ids)
+            padding_masks = torch.LongTensor(padding_masks)
+            subword_masks = torch.LongTensor(subword_masks)
             master_mat = torch.stack(master_mat, 0)
-            return MultiScopeDataset(input_ids, master_padding_masks, scopes, input_len, cues, master_subword_masks, master_input_ids, master_mat)
+            return MultiScopeDataset(input_ids, padding_masks, scopes, input_len, cues, subword_masks, master_mat)
         else:
             raise ValueError(cue_or_scope, example_type)
     
