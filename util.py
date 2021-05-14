@@ -1,4 +1,4 @@
-from typing import List, Tuple, T
+from typing import List, Tuple, T, Dict
 import logging
 import math
 import json
@@ -62,7 +62,7 @@ def init_logger(log_file=None, log_file_level=logging.NOTSET):
         logger.addHandler(file_handler)
     return logger
     
-global_logger = init_logger(log_file=f'{param.model_name}.log')
+global_logger = init_logger(log_file=f'{param.base_path}/{param.model_name}.log')
 
 def pad_sequences(sequences, maxlen=None, dtype='int32',
                   padding='pre', truncating='pre', value=0.):
@@ -318,19 +318,24 @@ def multi_matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], cue
                 for col_i, col_e in enumerate(row_e):
                     if col_e == 3:
                         pos.append(row_i)
+            pos = list(set(pos))
             if len(pos) == 0:
                 stmp.append(batch[i][0])
                 ctmp.append([0])
-            candidates = [mat[i]==1 for i in pos]
-            candidates = [e.argmax(-1) for e in candidates]
-            picked = filter_same_cue(candidates)
-            for e in picked:
-                if isinstance(e, list):
-                    stmp.append(batch[i][e[0]])
-                    ctmp.append(e)
-                else:
-                    stmp.append(batch[i][e])
-                    ctmp.append([e])
+            else:
+                print()
+            candidates = []
+            for j in pos:
+                candidates.append([[1 if e==1 else 0 for e in mat[j]], j])
+            if len(pos) != 0:
+                picked = filter_same_cue(candidates)
+                for e in picked:
+                    if isinstance(e, list):
+                        stmp.append(batch[i][e[0]])
+                        ctmp.append(e)
+                    else:
+                        stmp.append(batch[i][e])
+                        ctmp.append([e])
             pred_scopes.append(stmp)
             pred_cues.append(ctmp)
     else:
@@ -338,7 +343,7 @@ def multi_matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], cue
         
     return pred_scopes, pred_cues
         
-def filter_same_cue(candidates: List, thres=0.95):
+def filter_same_cue(candidates: List[List], thres=0.95):
     """
     Using Non-Maximum Suppression (NMS) to filter out highly similar scopes (that possibly belong to same cue)
     """
@@ -346,16 +351,27 @@ def filter_same_cue(candidates: List, thres=0.95):
     next_ = list(range(len(candidates)))
     while len(next_) > 0:
         last = next_[-1]
-        pick.append(last)
+        if candidates[last][0].count(1) == 0:
+            # Drop candidate with no scope
+            next_.pop(-1)
+            continue
+        pick.append([candidates[last][1]])
         next_.pop(-1)
         if len(next_) == 0:
             break
         for i in range(last):
-            f = f1_score(candidates[last], candidates[i])
+            f = f1_score(candidates[last][0], candidates[i][0], zero_division=1)
             if f > thres:
-                pick[-1] = [pick[-1], i]
-                next_.pop(i)
+                if isinstance(pick[-1], list):
+                    pick[-1].append(candidates[i][1])
+                else:
+                    pick[-1] = [pick[-1], candidates[i][1]]
+                idx = next_.index(i)
+                next_.pop(idx)
     return pick
+
+def get_tar_cue_pos(cue_tar):
+    pass
 
 def handle_eval_multi(scope_pred, scope_tar, cue_pred, cue_tar):
     if len(scope_pred) == 1:
@@ -365,9 +381,9 @@ def handle_eval_multi(scope_pred, scope_tar, cue_pred, cue_tar):
         for i, cp in enumerate(cue_pred):
             match = -1
             if isinstance(cp, list):
-                for j, cg in enumerate(cue_tar):
+                for j, ct in enumerate(cue_tar):
                     for c in cp:
-                        if cg[c] == 1:
+                        if ct[c] == 1:
                             match = j
                 cue_matches.append(match)
         preds = []
@@ -679,7 +695,7 @@ class ModelCheckpoint(object):
             checkpoint_dir = checkpoint_dir
         else:
             checkpoint_dir = Path(checkpoint_dir)
-        checkpoint_dir.mkdir(exist_ok=True)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
         assert checkpoint_dir.is_dir()
         self.base_path = checkpoint_dir
         self.arch = arch
