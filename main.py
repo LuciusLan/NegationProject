@@ -1,14 +1,14 @@
 import os
+import random
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
-from rouge import Rouge
 from sklearn.metrics import classification_report
 import numpy as np
-import random
-import logging
 
 from data import SplitData, cue_label2id, SplitMoreData
 from processor import Processor, NaiveTokenizer, CueExample, CueFeature, ScopeExample, ScopeFeature, PipelineScopeFeature
@@ -18,62 +18,10 @@ from model_bert import CueBert, ScopeBert
 from optimizer import BertAdam, BERTReduceLROnPlateau, ASLSingleLabel
 from util import TrainingMonitor, ModelCheckpoint, EarlyStopping, global_logger
 from params import param
-rouge = Rouge()
 device = torch.device("cuda")
 
 def save_model(model, path:str):
     torch.save(model, path)
-
-
-def r_scope(input_tensor, y_true, y_pred, tokenizer, method='rouge-1', print_=False):
-    """
-    args:
-        input_tensor, y_true, y_pred: input sentence, actual label, predicted label tensor in shape of collection of batches.
-        method: use which rouge metric. Available options: rouge-1, rouge-2, rouge-l
-    """
-    input_tensor = [np.array(e) for e in input_tensor]
-    true_mask = [np.array(e == 1, dtype=bool) for e in y_true]
-    pred_mask = [np.array(e == 1, dtype=bool) for e in y_pred]
-    true_scopes = []
-    pred_scopes = []
-    for i in range(len(input_tensor)):
-        ts = input_tensor[i][true_mask[i]]
-        if len(ts) != 0:
-            ts_string = tokenizer.decode(ts)
-        else:
-            ts_string = ' '
-        true_scopes.append(ts_string)
-        ps = input_tensor[i][pred_mask[i]]
-        if len(ps) != 0:
-            ps_string = tokenizer.decode(ps)
-        else:
-            ps_string = ' '
-        pred_scopes.append(ps_string)
-    for (hyp, ref) in zip(true_scopes, pred_scopes):
-        hyp = [" ".join(_.split()) for _ in hyp.split(".") if len(_) > 0]
-        ref = [" ".join(_.split()) for _ in ref.split(".") if len(_) > 0]
-    score = rouge.get_scores(true_scopes, pred_scopes, avg=True)[method]
-    if print_:
-        global_logger.info(f"{method} f1: {score}")
-    return score['f']
-
-
-def f1_scope(y_true, y_pred, print_=False):
-    tp = 0
-    fn = 0
-    fp = 0
-    for y_t, y_p in zip(y_true, y_pred):
-        if torch.equal(y_t, y_p):
-            tp += 1
-        else:
-            fn += 1
-    prec = 1
-    rec = tp / (tp + fn)
-    if print_ is True:
-        print(f"Precision: {prec}")
-        print(f"Recall: {rec}")
-        print(f"F1 Score: {2*prec*rec/(prec+rec)}")
-
 
 proc = Processor()
 if param.split_and_save:
@@ -340,7 +288,6 @@ elif param.task == 'pipeline':
         scope_test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
         
 elif param.task == 'joint':
-    param.ignore_multi_negation = True
     if param.dataset_name == 'sfu':
         train_data = proc.load_examples(
             param.split_path['sfu']['joint_scope']['train'])
@@ -382,19 +329,34 @@ elif param.task == 'joint':
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
 
-    train_feature = proc.create_features(
-        train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    dev_feature = proc.create_features(
-        dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    test_feature = proc.create_features(
-        test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    
-    train_ds = proc.create_dataset(
-        train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
-    dev_ds = proc.create_dataset(
-        dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
-    test_ds = proc.create_dataset(
-        test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
+    if param.multi:
+        train_feature = proc.create_features_multi(
+            train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        dev_feature = proc.create_features_multi(
+            dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        test_feature = proc.create_features_multi(
+            test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        
+        train_ds = proc.create_dataset(
+            train_feature, cue_or_scope='multi', example_type='train', is_bert=param.is_bert)
+        dev_ds = proc.create_dataset(
+            dev_feature, cue_or_scope='multi', example_type='dev', is_bert=param.is_bert)
+        test_ds = proc.create_dataset(
+            test_feature, cue_or_scope='multi', example_type='test', is_bert=param.is_bert)
+    else:
+        train_feature = proc.create_features(
+            train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        dev_feature = proc.create_features(
+            dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        test_feature = proc.create_features(
+            test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
+        
+        train_ds = proc.create_dataset(
+            train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
+        dev_ds = proc.create_dataset(
+            dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
+        test_ds = proc.create_dataset(
+            test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
 
 if param.task in ['scope', 'cue', 'joint']:
     train_sp = RandomSampler(train_ds)
@@ -427,6 +389,10 @@ best_f = 0
 all_f1 = []
 for run in range(param.num_runs):
     global_logger.info('\nrun-%d', run)
+    if param.use_ASL:
+        criterion = ASLSingleLabel()
+    else:
+        criterion = nn.CrossEntropyLoss(ignore_index=0)
     if param.task == 'cue':
         model = CueBert.from_pretrained(
             'bert-base-cased', cache_dir='bert_base_cased_model', num_labels=4)
@@ -452,6 +418,7 @@ for run in range(param.num_runs):
             'lr': 0.0005}
         ]
     elif param.task == 'scope':
+        criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor([0, 50, 1, 50]).cuda(), ignore_index=0)
         model = ScopeBert.from_pretrained(
             'bert-base-cased', cache_dir='bert_base_cased_model', num_labels=param.label_dim)
         model.resize_token_embeddings(len(tokenizer))
@@ -471,6 +438,7 @@ for run in range(param.num_runs):
              'lr': param.lr},
         ]
     elif param.task == 'joint':
+        criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor([0, 50, 1, 50]).cuda(), ignore_index=0)
         model = ScopeBert.from_pretrained(
             'bert-base-cased', cache_dir='bert_base_cased_model', num_labels=param.label_dim)
         model.resize_token_embeddings(len(tokenizer))
@@ -495,13 +463,9 @@ for run in range(param.num_runs):
     lr_scheduler = BERTReduceLROnPlateau(optimizer, lr=param.lr, mode='max', factor=0.5, patience=5,
                                          verbose=1, epsilon=1e-8, cooldown=0, min_lr=0, eps=1e-8)
     train_monitor = TrainingMonitor(file_dir='pics', arch=param.model_name)
-    
-    if param.use_ASL:
-        criterion = ASLSingleLabel()
-    else:
-        criterion = nn.CrossEntropyLoss(ignore_index=0)
+
     if param.task == 'cue':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'D:/Dev/Bert/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
         early_stopping = EarlyStopping(patience=10, monitor='val_cue_f1', mode='max')
         trainer = CueTrainer(n_gpu=1,
                              model=model,
@@ -518,7 +482,7 @@ for run in range(param.num_runs):
                              early_stopping=early_stopping
                              )
     elif param.task == 'scope':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', 
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'D:/Dev/Bert/{param.model_name}', 
                                            monitor='val_scope_token_f1', mode='max', arch=param.model_name,
                                            best=None)
         early_stopping = EarlyStopping(patience=5, monitor='val_scope_token_f1', mode='max')
@@ -537,7 +501,7 @@ for run in range(param.num_runs):
                                early_stopping=early_stopping
                                )
     elif param.task == 'joint':
-        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'/home/wu/Project/model_chk/{param.model_name}', 
+        model_checkpoint = ModelCheckpoint(checkpoint_dir=f'D:/Dev/Bert/{param.model_name}', 
                                            monitor='val_scope_token_f1', mode='max', arch=param.model_name,
                                            best=None)
         early_stopping = EarlyStopping(patience=param.early_stop_thres, monitor='val_scope_token_f1', mode='max')
@@ -560,18 +524,36 @@ for run in range(param.num_runs):
         trainer.train(train_data=train_dl, valid_data=dev_dl,
                       epochs=param.num_ep, is_bert=param.is_bert)
         if param.predict_cuesep:
-            cue_test_info, cue_sep_test_info = trainer.test_epoch(test_dl, is_bert=param.is_bert)
+            cue_test_info, cue_sep_test_info = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
         else:
-            cue_test_info = trainer.test_epoch(test_dl, is_bert=param.is_bert)
+            cue_test_info = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
         f1 = target_weight_score(cue_test_info, ['1'])
     elif param.task == 'scope':
         trainer.train(train_data=train_dl, valid_data=dev_dl,
                       epochs=param.num_ep, is_bert=param.is_bert)
+        resume_path = os.path.join('model_chk', param.model_name)
+        del model
+        model = ScopeBert.from_pretrained(resume_path).to(device)
+        trainer = ScopeTrainer(n_gpu=1,
+                               model=model,
+                               logger=global_logger,
+                               optimizer=optimizer,
+                               lr_scheduler=lr_scheduler,
+                               label2id=None,
+                               criterion=criterion,
+                               training_monitor=train_monitor,
+                               model_checkpoint=model_checkpoint,
+                               resume_path=resume_path,
+                               grad_clip=5.0,
+                               gradient_accumulation_steps=1,
+                               early_stopping=early_stopping
+                               )
         scope_val_info, cue_f1, scope_match = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
         f1 = target_weight_score(scope_val_info, ['1'])
         global_logger.info(f1)
         if f1[0] > best_f:
             best_f = f1[0]
+            model.save_pretrained('model_chk/best'+param.model_name)
         all_f1.append(f1[0])
         del model
     elif param.task == 'pipeline':
@@ -579,12 +561,31 @@ for run in range(param.num_runs):
     elif param.task == 'joint':
         trainer.train(train_data=train_dl, valid_data=dev_dl,
                       epochs=param.num_ep, is_bert=param.is_bert)
+        resume_path = os.path.join('model_chk', param.model_name)
+        del model
+        model = ScopeBert.from_pretrained(resume_path).to(device)
+        trainer = ScopeTrainer(n_gpu=1,
+                               model=model,
+                               logger=global_logger,
+                               optimizer=optimizer,
+                               lr_scheduler=lr_scheduler,
+                               label2id=None,
+                               criterion=criterion,
+                               training_monitor=train_monitor,
+                               model_checkpoint=model_checkpoint,
+                               resume_path=resume_path,
+                               grad_clip=5.0,
+                               gradient_accumulation_steps=1,
+                               early_stopping=early_stopping
+                               )
         scope_val_info, cue_f1, scope_match = trainer.valid_epoch(test_dl, is_bert=param.is_bert)
         f1 = target_weight_score(scope_val_info, ['1'])
         global_logger.info(f1)
         if f1[0] > best_f:
             best_f = f1[0]
+            model.save_pretrained('model_chk/best'+param.model_name)
         all_f1.append(f1[0])
+        del model
     """
     model = ScopeRNN(vocab_size=tokenizer.dictionary.__len__(), tokenizer=tokenizer)
     model.to(device)
