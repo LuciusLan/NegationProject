@@ -116,75 +116,6 @@ class CueTrainer(object):
                  'best': best}
         return state
 
-    def test_epoch(self, data_features, is_bert=True):
-        pbar = tqdm(total=len(data_features), desc='Evaluating')
-        test_loss = AverageMeter()
-        wrap_cue_pred = []
-        wrap_cue_sep_pred = []
-        wrap_cue_tar = []
-        wrap_cue_sep_tar = []
-        for step, f in enumerate(data_features):
-            input_lens = f[4]
-            num_labels = len(self.id2label)
-            input_ids = f[0].to(self.device)
-            padding_mask = f[1].to(self.device)
-            subword_mask = f[-1].to(self.device)
-            cues = f[2].to(self.device)
-            cue_sep = f[3].to(self.device)
-            active_padding_mask = padding_mask.view(-1) == 1
-
-            self.model.eval()
-            with torch.no_grad():
-                if param.predict_cuesep:
-                    cue_logits, cue_sep_logits = self.model(input_ids, padding_mask)
-                    cue_loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
-                    cue_sep_loss = self.criterion(cue_sep_logits.view(-1, 5)[active_padding_mask], cue_sep.view(-1)[active_padding_mask])
-                    loss = cue_loss + cue_sep_loss
-                else:
-                    cue_logits = self.model(input_ids, padding_mask)
-                    loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
-            test_loss.update(val=loss.item(), n=input_ids.size(0))
-            if is_bert:
-                cue_pred, cue_tar = pack_subword_pred(cue_logits.detach().cpu(), cues.detach().cpu(), subword_mask.detach().cpu(), padding_mask.detach().cpu())
-                if param.predict_cuesep:
-                    cue_sep_pred, cue_sep_tar = pack_subword_pred(cue_sep_logits.detach().cpu(), cue_sep.detach().cpu(), subword_mask.detach().cpu(), padding_mask.detach().cpu())
-            else:
-                cue_pred = cue_logits.argmax()
-                cue_tar = cues
-                if param.predict_cuesep:
-                    cue_sep_pred = cue_sep_logits.argmax()
-                    cue_sep_tar = cue_sep
-
-            if param.predict_cuesep:
-                for i1, sent in enumerate(cue_pred):
-                    for i2, _ in enumerate(sent):
-                        wrap_cue_pred.append(cue_pred[i1][i2])
-                        wrap_cue_tar.append(cue_tar[i1][i2])
-                        wrap_cue_sep_pred.append(cue_sep_pred[i1][i2])
-                        wrap_cue_sep_tar.append(cue_sep_tar[i1][i2])
-            else:
-                for i1, sent in enumerate(cue_pred):
-                    for i2, _ in enumerate(sent):
-                        wrap_cue_pred.append(cue_pred[i1][i2])
-                        wrap_cue_tar.append(cue_tar[i1][i2])
-
-            #wrap_cue_pred.append([cp for sent_ in cue_pred for cp in sent_])
-            #wrap_cue_sep_pred.append([csp for sent_ in cue_sep_pred for csp in sent_])
-            #wrap_cue_tar.append([ct for sent_ in cue_tar for ct in sent_])
-            #wrap_cue_sep_tar.append([cst for sent_ in cue_sep_tar for cst in sent_])
-            pbar.update()
-            pbar.set_postfix({'loss': loss.item()})
-        #self.logger.info('\n Token Level F1:\n')
-        cue_test_info = classification_report(wrap_cue_tar, wrap_cue_pred, output_dict=True, digits=5)
-        if param.predict_cuesep:
-            cue_sep_test_info = classification_report(wrap_cue_sep_tar, wrap_cue_sep_pred, output_dict=True, digits=5)
-        if 'cuda' in str(self.device):
-            torch.cuda.empty_cache()
-        if param.predict_cuesep:
-            return cue_test_info, cue_sep_test_info
-        else:
-            return cue_test_info
-
     def valid_epoch(self, data_features, is_bert=True):
         pbar = tqdm(total=len(data_features), desc='Evaluating')
         valid_loss = AverageMeter()
@@ -260,18 +191,34 @@ class CueTrainer(object):
         for step, batch in enumerate(data_loader):
             self.model.train()
             batch = tuple(t.to(self.device) for t in batch)
+            bs = batch[0].size(0)
             num_labels = len(self.id2label)
-            input_ids, padding_mask, cues, cue_sep, input_len, subword_mask = batch
+            if param.matrix:
+                input_ids, padding_mask, cues, cue_sep, input_len, subword_mask, cue_matrix = batch
+            else:
+                input_ids, padding_mask, cues, cue_sep, input_len, subword_mask = batch
             active_padding_mask = padding_mask.view(-1) == 1
 
-            if param.predict_cuesep:
-                cue_logits, cue_sep_logits = self.model(input_ids, padding_mask, cue_teacher=cues)
-                cue_loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
-                cue_sep_loss = self.criterion(cue_sep_logits.view(-1, max_num_cue+1)[active_padding_mask], cue_sep.view(-1)[active_padding_mask])
-                loss = cue_loss + cue_sep_loss
+            if param.cue_matrix:
+                pad_matrix = []
+                for i in range(bs):
+                    tmp = padding_mask[i].clone()
+                    tmp = tmp.view(param.max_len, 1)
+                    tmp_t = tmp.transpose(0, 1)
+                    mat = tmp * tmp_t
+                    pad_matrix.append(mat)
+                pad_matrix = torch.stack(pad_matrix, 0)
+                active_padding_mask = pad_matrix.view(-1) == 1
+                cue_logits = self.model(input_ids, padding_mask)[0]
             else:
-                cue_logits = self.model(input_ids, padding_mask)
-                loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
+                if param.predict_cuesep:
+                    cue_logits, cue_sep_logits = self.model(input_ids, padding_mask, cue_teacher=cues)
+                    cue_loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
+                    cue_sep_loss = self.criterion(cue_sep_logits.view(-1, max_num_cue+1)[active_padding_mask], cue_sep.view(-1)[active_padding_mask])
+                    loss = cue_loss + cue_sep_loss
+                else:
+                    cue_logits = self.model(input_ids, padding_mask)
+                    loss = self.criterion(cue_logits.view(-1, num_labels)[active_padding_mask], cues.view(-1)[active_padding_mask])
 
             #if len(self.n_gpu.split(",")) >= 2:
             #    loss = loss.mean()
@@ -406,9 +353,13 @@ class ScopeTrainer(object):
             num_labels = param.label_dim
             input_ids = f[0].to(self.device)
             padding_mask = f[1].to(self.device)
-            scopes = f[2].to(self.device)
             input_lens = f[3]
-            cues = f[4].to(self.device)
+            if not param.multi:
+                scopes = f[2].to(self.device)
+                cues = f[4].to(self.device)
+            else:
+                scopes = f[2]
+                cues = f[4]
             subword_mask = f[5].to(self.device)
             bs = f[0].size(0)
             if param.matrix:
@@ -458,15 +409,20 @@ class ScopeTrainer(object):
 
             if is_bert:
                 if param.matrix:
-                    label_logits = scope_logits[1] if param.fact else scope_logits
-                    tmp_scope_pred = util.matrix_decode_toseq(label_logits, pad_matrix)                    
-                    scope_pred = []
-                    scope_tar = []
-                    for i in range(bs):
-                        pred, tar = pack_subword_pred(tmp_scope_pred[i].detach().cpu().unsqueeze(0), scopes[i].detach().cpu().unsqueeze(0),
-                                                      subword_mask[i].detach().cpu().unsqueeze(0), padding_mask[i].cpu().unsqueeze(0))
-                        scope_pred.append(pred[0])
-                        scope_tar.append(tar[0])
+                    if param.multi:
+                        temp_scope_pred, temp_cue_pred = util.multi_matrix_decode_toseq(scope_logits, pad_matrix)
+                        scope_pred, scope_tar = util.handle_eval_multi(temp_scope_pred, scopes, temp_cue_pred, cues)
+                        print()
+                    else:
+                        label_logits = scope_logits[1] if param.fact else scope_logits
+                        tmp_scope_pred = util.matrix_decode_toseq(label_logits, pad_matrix)                    
+                        scope_pred = []
+                        scope_tar = []
+                        for i in range(bs):
+                            pred, tar = pack_subword_pred(tmp_scope_pred[i].detach().cpu().unsqueeze(0), scopes[i].detach().cpu().unsqueeze(0),
+                                                        subword_mask[i].detach().cpu().unsqueeze(0), padding_mask[i].cpu().unsqueeze(0))
+                            scope_pred.append(pred[0])
+                            scope_tar.append(tar[0])
                 else:
                     scope_pred, scope_tar = pack_subword_pred(scope_logits.detach().cpu(), scopes.detach().cpu(), subword_mask.detach().cpu(), padding_mask.cpu())
 
@@ -480,7 +436,7 @@ class ScopeTrainer(object):
                 for i, seq in enumerate(input_ids):
                     new_pred.append(util.handle_eval_joint(scope_pred[i], scope_tar[i]))
                 scope_pred = new_pred
-            if param.dataset_name == 'sherlock':
+            """if param.dataset_name == 'sherlock':
                 # Post process for Sherlock, separate "n't" words and mark affixal cues
                 new_pred = []
                 new_tar = []
@@ -526,7 +482,8 @@ class ScopeTrainer(object):
         scope_val_info = classification_report(wrap_scope_tar, wrap_scope_pred, output_dict=True, digits=5)
         if 'cuda' in str(self.device):
             torch.cuda.empty_cache()
-        return scope_val_info, cue_f1, scope_match
+        return scope_val_info, cue_f1, scope_match"""
+        return {'1': {'f1-score':0,'precision':0,'recall':0,'support':0}}, 0,0
 
     def train_epoch(self, data_loader, valid_data):
         pbar = tqdm(total=len(data_loader), desc='Training')
@@ -534,7 +491,7 @@ class ScopeTrainer(object):
         tr_loss = AverageMeter()
         for step, batch in enumerate(data_loader):
             self.model.train()
-            batch = tuple(t.to(self.device) for t in batch)
+            batch = tuple(t.to(self.device) if isinstance(t, torch.Tensor) else t for t in batch)
             if param.matrix:
                 input_ids, padding_mask, scopes, input_len, cues, subword_mask, scopes_matrix = batch
             else:

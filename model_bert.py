@@ -28,8 +28,11 @@ class CueBert(BertPreTrainedModel):
         self.max_num_cue = max_num_cue + 1
         self.bert = BertModel(config, add_pooling_layer=False)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.cue = nn.Linear(config.hidden_size, config.num_labels)
-        self.cue_sep = CueSepPooler(config.hidden_size, max_num_cue)
+        if param.cue_matrix:
+            self.cue = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
+        else:
+            self.cue = nn.Linear(config.hidden_size, config.num_labels)
+            self.cue_sep = CueSepPooler(config.hidden_size, max_num_cue)
         self.init_weights()
     
     def forward(
@@ -73,16 +76,21 @@ class CueBert(BertPreTrainedModel):
         sequence_output = outputs[0]
 
         sequence_output = self.dropout(sequence_output)
-        cue_logits = self.cue(sequence_output)
-        if cue_teacher is None:
-            cue_temp = F.softmax(cue_logits, -1)
-            cue_temp = torch.argmax(cue_temp, -1).unsqueeze(2).float()
-            cue_sep_logits = self.cue_sep(sequence_output, cue_temp)
-        else:
-            cue_sep_logits = self.cue_sep(sequence_output, cue_teacher.unsqueeze(2).float())
 
-        if param.predict_cuesep:
-            return cue_logits, cue_sep_logits
+        cue_logits = self.cue(sequence_output)
+
+        if not param.cue_matrix:
+            if cue_teacher is None:
+                cue_temp = F.softmax(cue_logits, -1)
+                cue_temp = torch.argmax(cue_temp, -1).unsqueeze(2).float()
+                cue_sep_logits = self.cue_sep(sequence_output, cue_temp)
+            else:
+                cue_sep_logits = self.cue_sep(sequence_output, cue_teacher.unsqueeze(2).float())
+
+            if param.predict_cuesep:
+                return cue_logits, cue_sep_logits
+            else:
+                return cue_logits
         else:
             return cue_logits
 
@@ -100,7 +108,7 @@ class ScopeBert(BertPreTrainedModel):
                 else:
                     self.scope = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
             else:
-                if param.task == 'joint':
+                if param.task == 'joint' or param.multi:
                     self.scope = BiaffineClassifier(config.hidden_size, 1024, output_dim=config.num_labels)
                 else:
                     self.lstm = nn.LSTM(config.hidden_size+1, 300, batch_first=True, bidirectional=True)
@@ -155,7 +163,7 @@ class ScopeBert(BertPreTrainedModel):
         )
 
         sequence_output = outputs[0]
-        if not param.augment_cue and param.task != 'joint':
+        if not param.augment_cue and param.task != 'joint' and not param.multi:
             # Append the cue embedding to the BERT output
             ### Alternative way: concat at input to form doubled length input
             sequence_output = torch.cat([sequence_output, cues.unsqueeze(-1)], 2)
@@ -168,7 +176,7 @@ class ScopeBert(BertPreTrainedModel):
             else:
                 logits = self.scope(sequence_output)
         else:
-            if param.task == 'joint':
+            if param.task == 'joint' or param.multi:
                 logits = self.scope(sequence_output)
             else:
                 logits = self.lstm(sequence_output)
