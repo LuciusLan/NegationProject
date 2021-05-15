@@ -342,49 +342,76 @@ def multi_matrix_decode_toseq(logits: torch.Tensor, pad: List[torch.Tensor], cue
         pred_cues = None
         
     return pred_scopes, pred_cues
-        
+
+def lookup(cand, l):
+    for i, e in enumerate(cand):
+        if e[1] == l:
+            return i
+
 def filter_same_cue(candidates: List[List], thres=0.95):
     """
     Using Non-Maximum Suppression (NMS) to filter out highly similar scopes (that possibly belong to same cue)
     """
     pick = []
-    next_ = list(range(len(candidates)))
-    while len(next_) > 0:
-        last = next_[-1]
-        if candidates[last][0].count(1) == 0:
+    filtered = {}
+    for row in candidates:
+        if row[0].count(1) != 0:
             # Drop candidate with no scope
-            next_.pop(-1)
-            continue
-        pick.append([candidates[last][1]])
-        next_.pop(-1)
-        if len(next_) == 0:
-            break
-        for i in range(last):
-            f = f1_score(candidates[last][0], candidates[i][0], zero_division=1)
+            filtered[row[1]]= row[0]
+    while len(filtered) > 0:
+        last = list(filtered.keys())[-1]
+        pick.append(last)
+        for key in list(filtered.keys()):
+            if key == last:
+                continue
+            f = f1_score(filtered[last], filtered[key], zero_division=1)
             if f > thres:
                 if isinstance(pick[-1], list):
-                    pick[-1].append(candidates[i][1])
+                    pick[-1].append(key)
                 else:
-                    pick[-1] = [pick[-1], candidates[i][1]]
-                idx = next_.index(i)
-                next_.pop(idx)
+                    pick[-1] = [pick[-1], key]
+                filtered.pop(key)
+        filtered.pop(last)
     return pick
 
-def get_tar_cue_pos(cue_tar):
-    pass
+def get_valid_tar(input_: torch.Tensor, o_label=2):
+    """
+    For input set of cue/scope target, filter out the padding all-zero target
+    """
+    temp = []
+    for row in input_:
+        if row.tolist().count(o_label) != 0:
+            temp.append(row)
+    if len(temp) != 0:
+        return torch.stack(temp)
+    else:
+        return None
 
-def handle_eval_multi(scope_pred, scope_tar, cue_pred, cue_tar):
+def get_tar_cue_pos(cue_tar) -> List[List]:
+    pos = []
+    for row in cue_tar:
+        temp = []
+        for i, e in enumerate(row):
+            if e==1:
+                temp.append(i)
+        pos.append(temp)
+    return pos
+
+def handle_eval_multi(scope_pred, scope_tar, cue_pred: List[List], cue_tar):
+    scope_tar = get_valid_tar(scope_tar, o_label=2)
+    cue_tar = get_valid_tar(cue_tar, o_label=3)
+    tar_cue_pos = get_tar_cue_pos(cue_tar)
     if len(scope_pred) == 1:
-        return [scope_pred], [scope_tar]
+        return [scope_pred[0]], [scope_tar[0]]
     else:
         cue_matches = []
         for i, cp in enumerate(cue_pred):
             match = -1
             if isinstance(cp, list):
-                for j, ct in enumerate(cue_tar):
-                    for c in cp:
-                        if ct[c] == 1:
-                            match = j
+                for j, ct in enumerate(tar_cue_pos):
+                    sct = set(ct)
+                    scp = set(cp)
+                    match = -1 if len(sct.intersection(scp)) == 0 else j
                 cue_matches.append(match)
         preds = []
         tars = []
@@ -392,7 +419,7 @@ def handle_eval_multi(scope_pred, scope_tar, cue_pred, cue_tar):
             if cm == -1:
                 # Predicting non-existing cue, mark all predicted scope token as false positive
                 preds.append(scope_pred[i])
-                tars.append([2 for e in scope_pred[i]])
+                tars.append(torch.FloatTensor([2 for e in scope_pred[i]]).cuda())
             else:
                 preds.append(scope_pred[i])
                 tars.append(scope_tar[cm])
@@ -537,7 +564,7 @@ def pack_subword_pred(logits, targets, subword_mask, padding_mask) -> Tuple[T, T
 
     return actual_logits, actual_label_ids
 
-def postprocess_sher(input_id, scope_pred, cue, subword_mask, input_len, text_seq, text_string):
+def postprocess_sher(scope_pred, cue, subword_mask, input_len, text_seq, text_string, **kwargs):
     new_pred = scope_pred
     packed_text = pack_subword_text(text_seq, subword_mask, input_len)
     if 'n\'t' in text_string:
@@ -552,18 +579,11 @@ def postprocess_sher(input_id, scope_pred, cue, subword_mask, input_len, text_se
     if 4 in cue:
         # for affixal cue, mark it as part of scope, to simulate separation of affixes 
         # (root being scope, affix being cue)
-        packed_cue = pack_subword_text(cue, subword_mask, input_len)
-        if param.task == 'joint':
-            # For joint model, don't leak gold cue information, use simple rules instead.
-            is_aff = r'(^(un)|(non)|(dis)|(in)|(ir)|(im)|(il))|(less$)'
-            for i, word in enumerate(packed_text):
-                if re.search(is_aff, word, re.I) is not None and new_pred[i] == 3:
-                    new_pred[i] = 1
-        else:
-            # For pipeline model, use input cue information (either predicted or gold) to get better result
-            for i, c in enumerate(packed_cue):
-                if c == 4 and new_pred[i] == 3:
-                    new_pred[i] = 1
+        # For joint model, don't leak gold cue information, use simple rules instead.
+        is_aff = r'(^(un)|(non)|(dis)|(in)|(ir)|(im)|(il))|(less$)'
+        for i, word in enumerate(packed_text):
+            if re.search(is_aff, word, re.I) is not None and new_pred[i] == 3:
+                new_pred[i] = 1
     return new_pred
 
 

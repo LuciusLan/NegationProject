@@ -49,7 +49,7 @@ class ScopeExample(InputExample):
         self.sc_sent = sc_sent
 
 class SherScopeExample(ScopeExample):
-    """deprecated"""
+    """Combine the n't word in sherlock and sfu dataset"""
     def __init__(self, example):
         super().__init__(guid=example.guid, sent=example.sent, subword_mask=example.subword_mask,
                          cues=example.cues, scopes=example.scopes, sc_sent=example.sc_sent)
@@ -563,7 +563,7 @@ class Processor(object):
                     torch.save(dev_scope, f'{param.base_path}/split/joint_dev_scope_{cached_file}')
                 return (train_cue, dev_cue, test_cue), (train_scope, dev_scope, test_scope)
 
-    def combine_sher_ex(self, data: List[ExampleLike]) -> List[ExampleLike]:
+    def ex_combine_nt(self, data: List[ExampleLike]) -> List[ExampleLike]:
         tmp_data = []
         for item in data:
             tmp_data.append(SherScopeExample(item))

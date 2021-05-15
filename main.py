@@ -1,3 +1,4 @@
+from math import gamma
 import os
 import random
 import logging
@@ -15,7 +16,7 @@ from processor import Processor, NaiveTokenizer, CueExample, CueFeature, ScopeEx
 from trainer import CueTrainer, ScopeTrainer, target_weight_score
 from model import ScopeRNN
 from model_bert import CueBert, ScopeBert
-from optimizer import BertAdam, BERTReduceLROnPlateau, ASLSingleLabel
+from optimizer import BertAdam, BERTReduceLROnPlateau, FocalLoss
 from util import TrainingMonitor, ModelCheckpoint, EarlyStopping, global_logger
 from params import param
 device = torch.device("cuda")
@@ -42,6 +43,9 @@ if param.task == 'cue':
             param.split_path['sfu']['cue']['train'])
         dev_data = proc.load_examples(param.split_path['sfu']['cue']['dev'])
         test_data = proc.load_examples(param.split_path['sfu']['cue']['test'])
+        train_data = proc.ex_combine_nt(train_data)
+        dev_data = proc.ex_combine_nt(dev_data)
+        test_data = proc.ex_combine_nt(test_data)
     elif param.dataset_name == 'bioscope_abstracts':
         train_data = proc.load_examples(
             param.split_path['bioscope_abstracts']['cue']['train'])
@@ -73,6 +77,9 @@ if param.task == 'cue':
             dev_raw, cue_or_scope='cue', example_type='dev', dataset_name='sherlock')
         test_data = proc.create_examples(
             test_raw, cue_or_scope='cue', example_type='test', dataset_name='sherlock')
+        train_data = proc.ex_combine_nt(train_data)
+        dev_data = proc.ex_combine_nt(dev_data)
+        test_data = proc.ex_combine_nt(test_data)
 
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
@@ -103,6 +110,9 @@ elif param.task == 'scope':
         dev_data = proc.load_examples(param.split_path['sfu']['scope']['dev'])
         test_data = proc.load_examples(
             param.split_path['sfu']['scope']['test'])
+        train_data = proc.ex_combine_nt(train_data)
+        dev_data = proc.ex_combine_nt(dev_data)
+        test_data = proc.ex_combine_nt(test_data)
     elif param.dataset_name == 'bioscope_abstracts':
         train_vocab = proc.load_examples(
             param.split_path['bioscope_abstracts']['cue']['train'])
@@ -140,9 +150,9 @@ elif param.task == 'scope':
             dev_raw, cue_or_scope='scope', example_type='dev', dataset_name='sherlock')
         test_data = proc.create_examples(
             test_raw, cue_or_scope='scope', example_type='test', dataset_name='sherlock')
-        train_data = proc.combine_sher_ex(train_data)
-        dev_data = proc.combine_sher_ex(dev_data)
-        test_data = proc.combine_sher_ex(test_data)
+        train_data = proc.ex_combine_nt(train_data)
+        dev_data = proc.ex_combine_nt(dev_data)
+        test_data = proc.ex_combine_nt(test_data)
 
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
@@ -190,103 +200,6 @@ elif param.task == 'scope':
             dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
         test_ds = proc.create_dataset(
             test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
-elif param.task == 'pipeline':
-    if param.dataset_name == 'sfu':
-        cue_train_data = proc.load_examples(
-            param.split_path['sfu']['joint_cue']['train'])
-        cue_dev_data = proc.load_examples(
-            param.split_path['sfu']['joint_cue']['dev'])
-        cue_test_data = proc.load_examples(
-            param.split_path['sfu']['joint_cue']['test'])
-        scope_train_data = proc.load_examples(
-            param.split_path['sfu']['joint_scope']['train'])
-        scope_dev_data = proc.load_examples(
-            param.split_path['sfu']['joint_scope']['dev'])
-        scope_test_data = proc.load_examples(
-            param.split_path['sfu']['joint_scope']['test'])
-    elif param.dataset_name == 'bioscope_abstracts':
-        cue_train_data = proc.load_examples(
-            param.split_path['bioscope_abstracts']['joint_cue']['train'])
-        cue_dev_data = proc.load_examples(
-            param.split_path['bioscope_abstracts']['joint_cue']['dev'])
-        cue_test_data = proc.load_examples(
-            param.split_path['bioscope_abstracts']['joint_cue']['test'])
-        scope_train_data = proc.load_examples(
-            param.split_path['bioscope_abstracts']['joint_scope']['train'])
-        scope_dev_data = proc.load_examples(
-            param.split_path['bioscope_abstracts']['joint_scope']['dev'])
-        scope_test_data = proc.load_examples(
-            param.split_path['bioscope_abstracts']['joint_scope']['test'])
-    elif param.dataset_name == 'bioscope_full':
-        cue_train_data = proc.load_examples(
-            param.split_path['bioscope_full']['joint_cue']['train'])
-        cue_dev_data = proc.load_examples(
-            param.split_path['bioscope_full']['joint_cue']['dev'])
-        cue_test_data = proc.load_examples(
-            param.split_path['bioscope_full']['joint_cue']['test'])
-        scope_train_data = proc.load_examples(
-            param.split_path['bioscope_full']['joint_scope']['train'])
-        scope_dev_data = proc.load_examples(
-            param.split_path['bioscope_full']['joint_scope']['dev'])
-        scope_test_data = proc.load_examples(
-            param.split_path['bioscope_full']['joint_scope']['test'])
-    elif param.dataset_name == 'sherlock':
-        train_raw = proc.read_data(
-            param.data_path['sherlock']['train'], dataset_name='sherlock')
-        sherlock_test1 = proc.read_data(
-            param.data_path['sherlock']['test1'], dataset_name='sherlock')
-        sherlock_test2 = proc.read_data(
-            param.data_path['sherlock']['test2'], dataset_name='sherlock')
-        test_raw = SplitData([sherlock_test1.cues, sherlock_test2.cues], [sherlock_test1.scopes, sherlock_test2.scopes], [
-                             sherlock_test1.non_cue_sents, sherlock_test2.non_cue_sents])
-        dev_raw = proc.read_data(
-            param.data_path['sherlock']['dev'], dataset_name='sherlock')
-        cue_train_data = proc.create_examples(
-            train_raw, cue_or_scope='cue', example_type='joint_train', dataset_name='sherlock')
-        cue_dev_data = proc.create_examples(
-            dev_raw, cue_or_scope='cue', example_type='joint_dev', dataset_name='sherlock')
-        cue_test_data = proc.create_examples(
-            test_raw, cue_or_scope='cue', example_type='joint_test', dataset_name='sherlock')
-        scope_train_data = proc.create_examples(
-            train_raw, cue_or_scope='scope', example_type='joint_train', dataset_name='sherlock')
-        scope_dev_data = proc.create_examples(
-            dev_raw, cue_or_scope='scope', example_type='joint_dev', dataset_name='sherlock')
-        scope_test_data = proc.create_examples(
-            test_raw, cue_or_scope='scope', example_type='joint_test', dataset_name='sherlock')
-
-    if param.embedding == 'BERT':
-        proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
-    else:
-        proc.get_tokenizer(data=cue_train_data, is_bert=False)
-
-    cue_train_feature = proc.create_features(
-        cue_train_data, cue_or_scope='cue', max_seq_len=param.max_len, is_bert=param.is_bert)
-    cue_dev_feature = proc.create_features(
-        cue_dev_data, cue_or_scope='cue', max_seq_len=param.max_len, is_bert=param.is_bert)
-    cue_test_feature = proc.create_features(
-        cue_test_data, cue_or_scope='cue', max_seq_len=param.max_len, is_bert=param.is_bert)
-
-    cue_train_ds = proc.create_dataset(
-        cue_train_feature, cue_or_scope='cue', example_type='train', is_bert=param.is_bert)
-    cue_dev_ds = proc.create_dataset(
-        cue_dev_feature, cue_or_scope='cue', example_type='dev', is_bert=param.is_bert)
-    cue_test_ds = proc.create_dataset(
-        cue_test_feature, cue_or_scope='cue', example_type='test', is_bert=param.is_bert)
-
-    scope_train_feature = proc.create_features(
-        scope_train_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    scope_dev_feature = proc.create_features(
-        scope_dev_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-    scope_test_feature = proc.create_features(
-        scope_test_data, cue_or_scope='scope', max_seq_len=param.max_len, is_bert=param.is_bert)
-
-    scope_train_ds = proc.create_dataset(
-        scope_train_feature, cue_or_scope='scope', example_type='train', is_bert=param.is_bert)
-    scope_dev_ds = proc.create_dataset(
-        scope_dev_feature, cue_or_scope='scope', example_type='dev', is_bert=param.is_bert)
-    scope_test_ds = proc.create_dataset(
-        scope_test_feature, cue_or_scope='scope', example_type='test', is_bert=param.is_bert)
-        
 elif param.task == 'joint':
     if param.dataset_name == 'sfu':
         train_data = proc.load_examples(
@@ -295,6 +208,9 @@ elif param.task == 'joint':
             param.split_path['sfu']['joint_scope']['dev'])
         test_data = proc.load_examples(
             param.split_path['sfu']['joint_scope']['test'])
+        train_data = proc.ex_combine_nt(train_data)
+        dev_data = proc.ex_combine_nt(dev_data)
+        test_data = proc.ex_combine_nt(test_data)
     elif param.dataset_name == 'bioscope_abstracts':
         train_data = proc.load_examples(
             param.split_path['bioscope_abstracts']['joint_scope']['train'])
@@ -326,6 +242,9 @@ elif param.task == 'joint':
             dev_raw, cue_or_scope='scope', example_type='joint_dev', dataset_name='sherlock')
         test_data = proc.create_examples(
             test_raw, cue_or_scope='scope', example_type='joint_test', dataset_name='sherlock')
+        train_data = proc.ex_combine_nt(train_data)
+        dev_data = proc.ex_combine_nt(dev_data)
+        test_data = proc.ex_combine_nt(test_data)
     if param.embedding == 'BERT':
         proc.get_tokenizer(data=None, is_bert=True, bert_path=param.bert_path)
 
@@ -367,30 +286,13 @@ if param.task in ['scope', 'cue', 'joint']:
     train_dl.tokenizer = tokenizer
     dev_dl.tokenizer = tokenizer
     test_dl.tokenizer = tokenizer
-elif param.task == 'pipeline':
-    cue_train_sp = RandomSampler(cue_train_ds)
-    cue_train_dl = DataLoader(cue_train_ds, batch_size=param.batch_size, sampler=train_sp)
-    cue_dev_dl = DataLoader(cue_dev_ds, batch_size=param.batch_size)
-    cue_test_dl = DataLoader(cue_test_ds, batch_size=param.batch_size)
-    tokenizer = proc.tokenizer
-    cue_train_dl.tokenizer = tokenizer
-    cue_dev_dl.tokenizer = tokenizer
-    cue_test_dl.tokenizer = tokenizer
-
-    scope_train_sp = RandomSampler(scope_train_ds)
-    scope_train_dl = DataLoader(scope_train_ds, batch_size=param.batch_size, sampler=train_sp)
-    scope_dev_dl = DataLoader(scope_dev_ds, batch_size=param.batch_size)
-    scope_test_dl = DataLoader(scope_test_ds, batch_size=param.batch_size)
-    scope_train_dl.tokenizer = tokenizer
-    scope_dev_dl.tokenizer = tokenizer
-    scope_test_dl.tokenizer = tokenizer
 
 best_f = 0
 all_f1 = []
 for run in range(param.num_runs):
     global_logger.info('\nrun-%d', run)
-    if param.use_ASL:
-        criterion = ASLSingleLabel()
+    if param.use_focal_loss:
+        criterion = FocalLoss()
     else:
         criterion = nn.CrossEntropyLoss(ignore_index=0)
     if param.task == 'cue':
@@ -418,7 +320,7 @@ for run in range(param.num_runs):
             'lr': 0.0005}
         ]
     elif param.task == 'scope':
-        criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor([0, 50, 1, 50]).cuda(), ignore_index=0)
+        criterion = FocalLoss(alpha=torch.FloatTensor([0, 50, 1, 50]).cuda(), gamma=2)
         model = ScopeBert.from_pretrained(
             'bert-base-cased', cache_dir='bert_base_cased_model', num_labels=param.label_dim)
         model.resize_token_embeddings(len(tokenizer))
@@ -466,7 +368,7 @@ for run in range(param.num_runs):
 
     if param.task == 'cue':
         model_checkpoint = ModelCheckpoint(checkpoint_dir=f'D:/Dev/Bert/{param.model_name}', monitor='val_cue_f1', mode='max', arch=param.model_name)
-        early_stopping = EarlyStopping(patience=10, monitor='val_cue_f1', mode='max')
+        early_stopping = EarlyStopping(patience=param.early_stop_thres, monitor='val_cue_f1', mode='max')
         trainer = CueTrainer(n_gpu=1,
                              model=model,
                              logger=global_logger,
@@ -485,7 +387,7 @@ for run in range(param.num_runs):
         model_checkpoint = ModelCheckpoint(checkpoint_dir=f'D:/Dev/Bert/{param.model_name}', 
                                            monitor='val_scope_token_f1', mode='max', arch=param.model_name,
                                            best=None)
-        early_stopping = EarlyStopping(patience=5, monitor='val_scope_token_f1', mode='max')
+        early_stopping = EarlyStopping(patience=param.early_stop_thres, monitor='val_scope_token_f1', mode='max')
         trainer = ScopeTrainer(n_gpu=1,
                                model=model,
                                logger=global_logger,

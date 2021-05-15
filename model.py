@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import data
 import numpy as np
 from params import param
-from optimizer import ASLSingleLabel
+from optimizer import FocalLoss
 import crf
 DEVICE = torch.device('cuda')
 
@@ -52,7 +52,7 @@ class ScopeRNN(nn.Module):
         self.init_linear(self.linear)
         self.label_emb = nn.Embedding(self.label_dim, self.hidden_dim*2)
         self.init_embedding(self.label_emb)
-        self.loss = ASLSingleLabel() if param.use_ASL else nn.CrossEntropyLoss()
+        self.loss = FocalLoss() if param.use_focal_loss else nn.CrossEntropyLoss()
         if param.use_crf is True:
             label2id = {label: i for i, label in enumerate(
                 range(param.label_dim-2))}
